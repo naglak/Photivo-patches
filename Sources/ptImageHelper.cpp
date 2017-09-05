@@ -87,7 +87,11 @@ bool ptImageHelper::WriteExif(const QString              &AFileName,
               << "Exif.Image.XResolution"
               << "Exif.Image.YResolution"
               << "Exif.Image.PlanarConfiguration"
-              << "Exif.Image.ResolutionUnit";
+              << "Exif.Image.ResolutionUnit"
+	      << "Exif.Image.JPEGInterchangeFormat"
+	      << "Exif.Image.JPEGInterchangeFormatLength"
+	      << "Exif.SonyMinolta.ThumbnailOffset"
+	      << "Exif.SonyMinolta.ThumbnailLength";
 
     for (short i = 0; i < ExifKeys.count(); i++) {
       if ((pos = hInExifData.findKey(Exiv2::ExifKey(ExifKeys.at(i).toLocal8Bit().data()))) != hInExifData.end())
