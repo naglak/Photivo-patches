@@ -1,4 +1,4 @@
-#!perl -w
+#!/usr/bin/env perl
 
 open INPUT,"tmp_presets";
 
