@@ -2529,8 +2529,8 @@ void CLASS sony_decrypt (unsigned *data, int len, int start, int key)
     for (m_sony_decrypt_p=0; m_sony_decrypt_p < 127; m_sony_decrypt_p++)
       m_sony_decrypt_pad[m_sony_decrypt_p] = htonl(m_sony_decrypt_pad[m_sony_decrypt_p]);
   }
-  while (len--)
-    *data++ ^= m_sony_decrypt_pad[m_sony_decrypt_p++ & 127] = m_sony_decrypt_pad[(m_sony_decrypt_p+1) & 127] ^ m_sony_decrypt_pad[(m_sony_decrypt_p+65) & 127];
+  while (len-- && m_sony_decrypt_p++)
+    *data++ ^= m_sony_decrypt_pad[(m_sony_decrypt_p-1) & 127] = m_sony_decrypt_pad[m_sony_decrypt_p & 127] ^ m_sony_decrypt_pad[(m_sony_decrypt_p+64) & 127];
 }
 
 void CLASS sony_load_raw()
@@ -2546,14 +2546,14 @@ void CLASS sony_load_raw()
   key = get4();
   fseek (m_InputFile, 164600, SEEK_SET);
   ptfread (head, 1, 40, m_InputFile);
-  sony_decrypt ((unsigned int *) head, 10, 1, key);
+  sony_decrypt ((unsigned *) head, 10, 1, key);
   for (i=26; i-- > 22; )
     key = key << 8 | head[i];
   fseek (m_InputFile, m_Data_Offset, SEEK_SET);
   for (row=0; row < m_RawHeight; row++) {
     pixel = m_Raw_Image + row*m_RawWidth;
     if (fread (pixel, 2, m_RawWidth, m_InputFile) < m_RawWidth) derror();
-    sony_decrypt ((unsigned int *) pixel, m_RawWidth/2, !row, key);
+    sony_decrypt ((unsigned *) pixel, m_RawWidth/2, !row, key);
     for (col=0; col < m_RawWidth; col++)
       if ((pixel[col] = ntohs(pixel[col])) >> 14) derror();
   }
@@ -2562,27 +2562,23 @@ void CLASS sony_load_raw()
 
 void CLASS sony_arw_load_raw()
 {
-  uint16_t huff[32768];
-  static const uint16_t tab[18] =
-  { 0xf11,0xf10,0xe0f,0xd0e,0xc0d,0xb0c,0xa0b,0x90a,0x809,
-    0x708,0x607,0x506,0x405,0x304,0x303,0x300,0x202,0x201 };
-  int i, c, n, col, row, len, diff, sum=0;
-
+  uint16_t huff[32770];                                                         
+  static const uint16_t tab[18] =                                               
+  { 0xf11,0xf10,0xe0f,0xd0e,0xc0d,0xb0c,0xa0b,0x90a,0x809,                      
+    0x708,0x607,0x506,0x405,0x304,0x303,0x300,0x202,0x201 };                    
+  int i, c, n, col, row, sum=0;                                                 
+                                                                                
+  huff[0] = 15;                                                                 
   for (n=i=0; i < 18; i++)
-    for (c=0;c<(32768 >> (tab[i] >> 8));c++) huff[n++] = tab[i];
-
-  getbits(-1);
-  for (col = m_RawWidth; col--; )
-    for (row=0; row < m_RawHeight+1; row+=2) {
-      if (row == m_RawHeight) row = 1;
-      len = getbithuff(15,huff);
-      diff = getbits(len);
-      if ((diff & (1 << (len-1))) == 0)
-  diff -= (1 << len) - 1;
-      if ((sum += diff) >> 12) derror();
-      if (row < m_Height) RAW(row,col) = sum;
-    }
-}
+    for (c=0;c<(32768 >> (tab[i] >> 8));c++) huff[++n] = tab[i];
+  getbits(-1);                                                                  
+  for (col = m_RawWidth; col--; )                                               
+    for (row=0; row < m_RawHeight+1; row+=2) {                                  
+      if (row == m_RawHeight) row = 1;                                          
+      if ((sum += ljpeg_diff(huff)) >> 12) derror();                            
+      if (row < m_Height) RAW(row,col) = sum;                                   
+    }                                                                           
+}                                                                               
 
 void CLASS sony_arw2_load_raw()
 {
@@ -2590,7 +2586,7 @@ void CLASS sony_arw2_load_raw()
   uint16_t pix[16];
   int row, col, val, max, min, imax, imin, sh, bit, i;
 
-  data = (uint8_t *) MALLOC (m_RawWidth);
+  data = (uint8_t *) MALLOC (m_RawWidth+1);
   merror (data, "sony_arw2_load_raw()");
   for (row=0; row < m_Height; row++) {
     ptfread (data, 1, m_RawWidth, m_InputFile);
@@ -7925,24 +7921,44 @@ wb550:
     m_Data_Offset = 787392;
     m_LoadRawFunction = &CLASS sony_load_raw;
   } else if (!strcmp(m_CameraMake,"SONY") && m_RawWidth == 3984) {
-    adobe_coeff ("SONY","DSC-R1");
     m_Width = 3925;
     m_ByteOrder = 0x4d4d;
-  } else if (!strcmp(m_CameraMake,"SONY") && m_RawWidth == 5504) {
-    m_Width -= 8;
-  } else if (!strcmp(m_CameraMake,"SONY") && m_RawWidth == 6048) {
+  } else if (!strcmp(m_CameraMake,"Sony") && m_RawWidth == 4288) {
+    m_Width -= 32;
+  } else if (!strcmp(m_CameraMake,"Sony") && m_RawWidth == 4600) {
+    if (!strcmp(m_CameraModel,"DSLR-A350"))
+      m_Height -= 4;
+    m_BlackLevel = 0;
+  } else if (!strcmp(m_CameraMake,"Sony") && m_RawWidth == 4928) {
+    if (m_Height < 3280) m_Width -= 8;
+  } else if (!strcmp(m_CameraMake,"Sony") && m_RawWidth == 5504) {
+    m_Width -= m_Height > 3664 ? 8 : 32;
+    if (!strncmp(m_CameraModel,"DSC",3))
+      m_BlackLevel = 200 << (m_Tiff_bps - 12);
+  } else if (!strcmp(m_CameraMake,"Sony") && m_RawWidth == 6048) {
     m_Width -= 24;
+    if (strstr(m_CameraModel,"RX1") || strstr(m_CameraModel,"A99"))
+      m_Width -= 6;
+  } else if (!strcmp(m_CameraMake,"Sony") && m_RawWidth == 7392) {
+    m_Width -= 30;
+  } else if (!strcmp(m_CameraMake,"Sony") && m_RawWidth == 8000) {
+    m_Width -= 32;
+    if (!strncmp(m_CameraModel,"DSC",3)) {
+      m_Tiff_bps = 14;
+      m_LoadRawFunction = &CLASS unpacked_load_raw;
+      m_BlackLevel = 512;
+    }
   } else if (!strcmp(m_CameraModel,"DSLR-A100")) {
     if (m_Width == 3880) {
       m_Height--;
       m_Width = ++m_RawWidth;
     } else {
+      m_Height -= 4;
+      m_Width  -= 4;
       m_ByteOrder = 0x4d4d;
       m_Load_Flags = 2;
     }
     m_Filters = 0x61616161;
-  } else if (!strcmp(m_CameraModel,"DSLR-A350")) {
-    m_Height -= 4;
   } else if (!strcmp(m_CameraModel,"PIXL")) {
     m_Height -= m_TopMargin = 4;
     m_Width -= m_LeftMargin = 32;
