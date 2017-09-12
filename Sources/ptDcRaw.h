@@ -592,7 +592,7 @@ public:
   void  border_interpolate(int border);
   void  pre_interpolate();
   void  hat_transform(float *temp,float *base,int st,int size,int sc);
-  void  cam_xyz_coeff(double cam_xyz[4][3]);
+  void  cam_xyz_coeff(float rgb_cam[3][4], double cam_xyz[4][3]);
   void  pseudoinverse(double(*in)[3],double(*out)[3],int size);
   void  gamma_curve (double pwr, double ts, int mode, int imax);
   void  subtract(const char *fname);

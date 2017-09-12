@@ -3782,7 +3782,7 @@ void CLASS pseudoinverse (double (*in)[3], double (*out)[3], int size)
   out[i][j] += work[j][k+3] * in[i][k];
 }
 
-void CLASS cam_xyz_coeff (double MatrixXYZToCamRGB[4][3])
+void CLASS cam_xyz_coeff (float MatrixCamRGBToSRGB[3][4], double MatrixXYZToCamRGB[4][3])
 {
   double MatrixSRGBToCamRGB[4][3], inverse[4][3], num;
   int i, j, k;
@@ -3811,7 +3811,7 @@ void CLASS cam_xyz_coeff (double MatrixXYZToCamRGB[4][3])
   m_RawColorPhotivo = m_RawColor;
   for (m_RawColor = i=0; i < 3; i++)
     for (j=0; j < m_Colors; j++)
-      m_MatrixCamRGBToSRGB[i][j] = inverse[j][i];
+      MatrixCamRGBToSRGB[i][j] = inverse[j][i];
 }
 
 void CLASS hat_transform (float *temp, float *base, int st, int size, int sc)
@@ -5681,12 +5681,12 @@ guess_l_cfa_pc:
     for (c=0; c < m_Colors; c++) for (i=0; i < 3; i++)
       for (l_cam_xyz[c][i]=j=0; j < m_Colors; j++)
   l_cam_xyz[c][i] += l_cc[c][j] * l_cm[j][i] * l_xyz[i];
-    cam_xyz_coeff (l_cam_xyz);
+    cam_xyz_coeff (m_cmatrix, l_cam_xyz);
   }
   if (l_asn[0]) {
     ASSIGN(m_CameraMultipliers[3], 0);
     for (c=0; c < m_Colors; c++) ASSIGN(m_CameraMultipliers[c], 1 / l_asn[c]);
-  }
+ }
 
   if (!l_use_cm)
     for (c=0; c < m_Colors; c++)
@@ -6569,7 +6569,7 @@ void CLASS adobe_coeff (const char *make, const char *model) {
       MatrixXYZToCamRGB[j][k] = AdobeTable[i].XYZToCam[j*3+k] / 10000.0;
           }
         }
-        cam_xyz_coeff (MatrixXYZToCamRGB);
+        cam_xyz_coeff (m_MatrixCamRGBToSRGB, MatrixXYZToCamRGB)  ;
       }
       break;
     }
@@ -6680,6 +6680,66 @@ void CLASS identify() {
     { 4508, 3330,  0,  0, -3, -6 } };
 
   static const struct {
+    ushort id;
+    char model[20];
+  } unique[] = {
+    { 0x168, "EOS 10D" },    { 0x001, "EOS-1D" },
+    { 0x175, "EOS 20D" },    { 0x174, "EOS-1D Mark II" },
+    { 0x234, "EOS 30D" },    { 0x232, "EOS-1D Mark II N" },
+    { 0x190, "EOS 40D" },    { 0x169, "EOS-1D Mark III" },
+    { 0x261, "EOS 50D" },    { 0x281, "EOS-1D Mark IV" },
+    { 0x287, "EOS 60D" },    { 0x167, "EOS-1DS" },
+    { 0x325, "EOS 70D" },
+    { 0x350, "EOS 80D" },    { 0x328, "EOS-1D X Mark II" },
+    { 0x170, "EOS 300D" },   { 0x188, "EOS-1Ds Mark II" },
+    { 0x176, "EOS 450D" },   { 0x215, "EOS-1Ds Mark III" },
+    { 0x189, "EOS 350D" },   { 0x324, "EOS-1D C" },
+    { 0x236, "EOS 400D" },   { 0x269, "EOS-1D X" },
+    { 0x252, "EOS 500D" },   { 0x213, "EOS 5D" },
+    { 0x270, "EOS 550D" },   { 0x218, "EOS 5D Mark II" },
+    { 0x286, "EOS 600D" },   { 0x285, "EOS 5D Mark III" },
+    { 0x301, "EOS 650D" },   { 0x302, "EOS 6D" },
+    { 0x326, "EOS 700D" },   { 0x250, "EOS 7D" },
+    { 0x393, "EOS 750D" },   { 0x289, "EOS 7D Mark II" },
+    { 0x347, "EOS 760D" },
+    { 0x254, "EOS 1000D" },
+    { 0x288, "EOS 1100D" },
+    { 0x327, "EOS 1200D" },  { 0x382, "Canon EOS 5DS" },
+    { 0x404, "EOS 1300D" },  { 0x401, "Canon EOS 5DS R" },
+    { 0x346, "EOS 100D" },
+  }, sonique[] = {
+    { 0x002, "DSC-R1" },     { 0x100, "DSLR-A100" },
+    { 0x101, "DSLR-A900" },  { 0x102, "DSLR-A700" },
+    { 0x103, "DSLR-A200" },  { 0x104, "DSLR-A350" },
+    { 0x105, "DSLR-A300" },  { 0x108, "DSLR-A330" },
+    { 0x109, "DSLR-A230" },  { 0x10a, "DSLR-A290" },
+    { 0x10d, "DSLR-A850" },  { 0x111, "DSLR-A550" },
+    { 0x112, "DSLR-A500" },  { 0x113, "DSLR-A450" },
+    { 0x116, "NEX-5" },      { 0x117, "NEX-3" },
+    { 0x118, "SLT-A33" },    { 0x119, "SLT-A55V" },
+    { 0x11a, "DSLR-A560" },  { 0x11b, "DSLR-A580" },
+    { 0x11c, "NEX-C3" },     { 0x11d, "SLT-A35" },
+    { 0x11e, "SLT-A65V" },   { 0x11f, "SLT-A77V" },
+    { 0x120, "NEX-5N" },     { 0x121, "NEX-7" },
+    { 0x123, "SLT-A37" },    { 0x124, "SLT-A57" },
+    { 0x125, "NEX-F3" },     { 0x126, "SLT-A99V" },
+    { 0x127, "NEX-6" },      { 0x128, "NEX-5R" },
+    { 0x129, "DSC-RX100" },  { 0x12a, "DSC-RX1" },
+    { 0x12e, "ILCE-3000" },  { 0x12f, "SLT-A58" },
+    { 0x131, "NEX-3N" },     { 0x132, "ILCE-7" },
+    { 0x133, "NEX-5T" },     { 0x134, "DSC-RX100M2" },
+    { 0x135, "DSC-RX10" },   { 0x136, "DSC-RX1R" },
+    { 0x137, "ILCE-7R" },    { 0x138, "ILCE-6000" },
+    { 0x139, "ILCE-5000" },  { 0x13d, "DSC-RX100M3" },
+    { 0x13e, "ILCE-7S" },    { 0x13f, "ILCA-77M2" },
+    { 0x153, "ILCE-5100" },  { 0x154, "ILCE-7M2" },
+    { 0x155, "DSC-RX100M4" },{ 0x156, "DSC-RX10M2" },
+    { 0x158, "DSC-RX1RM2" }, { 0x15a, "ILCE-QX1" },
+    { 0x15b, "ILCE-7RM2" },  { 0x15e, "ILCE-7SM2" },
+    { 0x161, "ILCA-68" },    { 0x165, "ILCE-6300" },
+  };
+
+  static const struct {
     int fsize;
     char make[12], model[19], withjpeg;
   } l_Table[] = {
@@ -6773,9 +6833,10 @@ void CLASS identify() {
     { 44390468, "Sinar",    ""                ,0 } };
 
   static const char *l_Corporation[] =
-    { "Canon", "NIKON", "EPSON", "KODAK", "Kodak", "OLYMPUS", "PENTAX",
-      "MINOLTA", "Minolta", "Konica", "CASIO", "Sinar", "Phase One",
-      "SAMSUNG", "Mamiya", "MOTOROLA", "LEICA" };
+   { "AgfaPhoto", "Canon", "Casio", "Epson", "Fujifilm",
+      "Mamiya", "Minolta", "Motorola", "Kodak", "Konica", "Leica",
+      "Nikon", "Nokia", "Olympus", "Ricoh", "Pentax", "Phase One",
+      "Samsung", "Sigma", "Sinar", "Sony" };
 
   // Byte order of input file.
   memset (m_Mask, 0, sizeof m_Mask);
@@ -6917,11 +6978,10 @@ void CLASS identify() {
   if (m_CameraMake[0] == 0) parse_jpeg (m_IsRaw = 0);
 
   for (i=0; i < sizeof l_Corporation / sizeof *l_Corporation; i++)
-    if (strstr (m_CameraMake, l_Corporation[i])) /* Simplify company names */
+    if (strcasestr (m_CameraMake, l_Corporation[i])) /* Simplify company names */
   strcpy (m_CameraMake, l_Corporation[i]);
-  if (!strncmp (m_CameraMake,"KODAK",5) &&
-  ((l_CharPointer = strstr(m_CameraModel," DIGITAL CAMERA")) ||
-   (l_CharPointer = strstr(m_CameraModel," Digital Camera")) ||
+  if ((!strcmp (m_CameraMake,"Kodak") || !strcmp(m_CameraMake, "Leica")) &&
+  ((l_CharPointer = strcasestr(m_CameraModel," DIGITAL CAMERA")) ||
    (l_CharPointer = strstr(m_CameraModel,"FILE VERSION"))))
      *l_CharPointer = 0;
   l_CharPointer = m_CameraMake + strlen(m_CameraMake);  /* Remove trailing spaces */
@@ -6981,9 +7041,14 @@ void CLASS identify() {
     m_LoadRawFunction = &CLASS packed_load_raw;
     m_WhiteLevel = 0xf7f;
   }
-
+  for (i=0; i < sizeof sonique / sizeof *sonique; i++)
+    if (unique_id == sonique[i].id)
+      strcpy (m_CameraModel, sonique[i].model);
+ 
 /* Set parameters based on camera name (for non-DNG files). */
 
+  if (!strcmp(m_CameraMake,"Sony") && m_RawWidth > 3888)
+    m_BlackLevel = 128 << (m_Tiff_bps - 12);
   if (m_IsFoveon) {
     if (m_Height*2 < m_Width) m_PixelAspect = 0.5;
     if (m_Height   > m_Width) m_PixelAspect = 2;
@@ -7920,7 +7985,7 @@ wb550:
     m_Mask[0][1] = 9;
     m_Data_Offset = 787392;
     m_LoadRawFunction = &CLASS sony_load_raw;
-  } else if (!strcmp(m_CameraMake,"SONY") && m_RawWidth == 3984) {
+  } else if (!strcmp(m_CameraMake,"Sony") && m_RawWidth == 3984) {
     m_Width = 3925;
     m_ByteOrder = 0x4d4d;
   } else if (!strcmp(m_CameraMake,"Sony") && m_RawWidth == 4288) {
