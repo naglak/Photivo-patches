@@ -6984,6 +6984,8 @@ void CLASS identify() {
   ((l_CharPointer = strcasestr(m_CameraModel," DIGITAL CAMERA")) ||
    (l_CharPointer = strstr(m_CameraModel,"FILE VERSION"))))
      *l_CharPointer = 0;
+  if (!strncasecmp(m_CameraModel,"PENTAX",6))
+    strcpy (m_CameraMake, "Pentax");
   l_CharPointer = m_CameraMake + strlen(m_CameraMake);  /* Remove trailing spaces */
   while (*--l_CharPointer == ' ') *l_CharPointer = 0;
   l_CharPointer = m_CameraModel + strlen(m_CameraModel);
