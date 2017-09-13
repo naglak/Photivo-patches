@@ -5979,19 +5979,17 @@ void CLASS ciff_block_1030()
   for (i=row=0; row < 8; row++)
     for (col=0; col < 8; col++) {
       if (vbits < bpp) {
-  bitbuf = bitbuf << 16 | (get2() ^ key[i++ & 1]);
-  vbits += 16;
+	bitbuf = bitbuf << 16 | (get2() ^ key[i++ & 1]);
+	vbits += 16;
       }
-      white[row][col] =
-  bitbuf << (LONG_BIT - vbits) >> (LONG_BIT - bpp);
-      vbits -= bpp;
+      white[row][col] = bitbuf >> (vbits -= bpp) & ~(-1 << bpp);
     }
 }
 
 /*
    Parse a CIFF file, better known as Canon CRW format.
  */
-void CLASS parse_ciff (int offset, int length)
+void CLASS parse_ciff (int offset, int length, int depth)
 {
   int tboff, nrecs, c, type, len, save, wbi=-1;
   uint16_t key[] = { 0x410, 0x45f3 };
@@ -6000,27 +5998,28 @@ void CLASS parse_ciff (int offset, int length)
   tboff = get4() + offset;
   fseek (m_InputFile, tboff, SEEK_SET);
   nrecs = get2();
-  if (nrecs > 100) return;
+  if ((nrecs | depth) > 127) return;
   while (nrecs--) {
     type = get2();
     len  = get4();
     save = ftell(m_InputFile) + 4;
     fseek (m_InputFile, offset+get4(), SEEK_SET);
     if ((((type >> 8) + 8) | 8) == 0x38)
-      parse_ciff (ftell(m_InputFile), len); /* Parse a sub-table */
-
+      parse_ciff (ftell(m_InputFile), len, depth+1); /* Parse a sub-table */
     if (type == 0x0810)
-      ptfread (m_Artist, 64, 1, m_InputFile);
+      fread (m_Artist, 64, 1, m_InputFile);
     if (type == 0x080a) {
-      ptfread (m_CameraMake, 64, 1, m_InputFile);
+      fread (m_CameraMake, 64, 1, m_InputFile);
       fseek (m_InputFile, strlen(m_CameraMake) - 63, SEEK_CUR);
-      ptfread (m_CameraModel, 64, 1, m_InputFile);
+      fread (m_CameraModel, 64, 1, m_InputFile);
     }
     if (type == 0x1810) {
-      fseek (m_InputFile, 12, SEEK_CUR);
+      m_Width = get4();
+      m_Height = get4();
+      m_PixelAspect = int_to_float(get4());
       m_Flip = get4();
     }
-    if (type == 0x1835)     /* Get the decoder table */
+    if (type == 0x1835)			/* Get the decoder table */
       m_Tiff_Compress = get4();
     if (type == 0x2007) {
       m_ThumbOffset = ftell(m_InputFile);
@@ -6040,39 +6039,39 @@ void CLASS parse_ciff (int offset, int length)
       if (m_Shutter > 1e6) m_Shutter = get2()/10.0;
     }
     if (type == 0x102c) {
-      if (get2() > 512) {   /* Pro90, G1 */
-  fseek (m_InputFile, 118, SEEK_CUR);
-  for (c=0; c < 4; c++) ASSIGN(m_CameraMultipliers[c ^ 2], get2());
-      } else {        /* G2, S30, S40 */
-  fseek (m_InputFile, 98, SEEK_CUR);
-  for (c=0; c < 4; c++) ASSIGN(m_CameraMultipliers[c ^ (c >> 1) ^ 1], get2());
+      if (get2() > 512) {		/* Pro90, G1 */
+	fseek (m_InputFile, 118, SEEK_CUR);
+	for (c=0; c<4; c++) m_CameraMultipliers[c ^ 2] = get2();
+      } else {				/* G2, S30, S40 */
+	fseek (m_InputFile, 98, SEEK_CUR);
+	for (c=0; c<4; c++) m_CameraMultipliers[c ^ (c >> 1) ^ 1] = get2();
       }
-    }
+    }	
     if (type == 0x0032) {
-      if (len == 768) {     /* EOS D30 */
-  fseek (m_InputFile, 72, SEEK_CUR);
-  for (c=0; c < 4; c++) ASSIGN(m_CameraMultipliers[c ^ (c >> 1)], 1024.0 / get2());
-  if (!wbi) ASSIGN(m_CameraMultipliers[0], -1); /* use my auto white balance */
-      } else if (!VALUE(m_CameraMultipliers[0])) {
-  if (get2() == key[0])   /* Pro1, G6, S60, S70 */
-    c = (strstr(m_CameraModel,"Pro1") ?
-        "012346000000000000":"01345:000000006008")[wbi]-'0'+ 2;
-  else {        /* G3, G5, S45, S50 */
-    c = "023457000000006000"[wbi]-'0';
-    key[0] = key[1] = 0;
-  }
-  fseek (m_InputFile, 78 + c*8, SEEK_CUR);
-  for (c=0; c < 4; c++) ASSIGN(m_CameraMultipliers[c ^ (c >> 1) ^ 1], get2() ^ key[c & 1]);
-  if (!wbi) ASSIGN(m_CameraMultipliers[0], -1);
+      if (len == 768) {			/* EOS D30 */
+	fseek (m_InputFile, 72, SEEK_CUR);
+	for (c=0; c<4; c++) m_CameraMultipliers[c ^ (c >> 1)] = 1024.0 / get2();
+	if (!wbi) m_CameraMultipliers[0] = -1;	/* use my auto white balance */
+      } else if (!m_CameraMultipliers[0]) {
+	if (get2() == key[0])		/* Pro1, G6, S60, S70 */
+	  c = (strstr(m_CameraModel,"Pro1") ?
+	      "012346000000000000":"01345:000000006008")[wbi]-'0'+ 2;
+	else {				/* G3, G5, S45, S50 */
+	  c = "023457000000006000"[wbi]-'0';
+	  key[0] = key[1] = 0;
+	}
+	fseek (m_InputFile, 78 + c*8, SEEK_CUR);
+	for (c=0; c<4; c++) m_CameraMultipliers[c ^ (c >> 1) ^ 1] = get2() ^ key[c & 1];
+	if (!wbi) m_CameraMultipliers[0] = -1;
       }
     }
-    if (type == 0x10a9) {   /* D60, 10D, 300D, and clones */
+    if (type == 0x10a9) {		/* D60, 10D, 300D, and clones */
       if (len > 66) wbi = "0134567028"[wbi]-'0';
       fseek (m_InputFile, 2 + wbi*8, SEEK_CUR);
-      for (c=0; c < 4; c++) ASSIGN(m_CameraMultipliers[c ^ (c >> 1)], get2());
+      for (c=0; c<4; c++) m_CameraMultipliers[c ^ (c >> 1)] = get2();
     }
     if (type == 0x1030 && (0x18040 >> wbi & 1))
-      ciff_block_1030();    /* all that don't have 0x10a9 */
+      ciff_block_1030();		/* all that don't have 0x10a9 */
     if (type == 0x1031) {
       m_RawWidth = (get2(),get2());
       m_RawHeight = get2();
@@ -6294,7 +6293,7 @@ int CLASS parse_jpeg (int offset)
     m_ByteOrder = get2();
     hlen  = get4();
     if (get4() == 0x48454150)   /* "HEAP" */
-      parse_ciff (save+hlen, len-hlen);
+      parse_ciff (save+hlen, len-hlen, 0);
     if (parse_tiff (save+6)) apply_tiff();
     fseek (m_InputFile, save+len, SEEK_SET);
   }
@@ -6927,7 +6926,7 @@ void CLASS identify() {
   } else if (m_ByteOrder == 0x4949 || m_ByteOrder == 0x4d4d) {
     if (!memcmp (l_Head+6,"HEAPCCDR",8)) {
       m_Data_Offset = l_HLen;
-      parse_ciff (l_HLen, l_FLen - l_HLen);
+      parse_ciff (l_HLen, l_FLen - l_HLen, 0);
     } else if (parse_tiff(0)) apply_tiff();
   } else if (!memcmp (l_Head,"\xff\xd8\xff\xe1",4) &&
        !memcmp (l_Head+6,"Exif",4)) {

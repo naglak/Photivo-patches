@@ -569,7 +569,7 @@ public:
   void  parse_phase_one(int base);
   void  parse_sinar_ia();
   void  parse_rollei();
-  void  parse_ciff(int offset,int length);
+  void  parse_ciff(int offset, int length, int depth);
   void  ciff_block_1030();
   void  parse_external_jpeg();
   int   parse_tiff(int base);
