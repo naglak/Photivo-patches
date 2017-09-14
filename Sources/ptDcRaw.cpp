@@ -1890,6 +1890,26 @@ void CLASS nokia_load_raw()
   m_WhiteLevel = 0x3ff;
 }
 
+void CLASS canon_rmf_load_raw()
+{
+  int row, col, bits, orow, ocol, c;
+
+  for (row=0; row < m_RawHeight; row++)
+    for (col=0; col < m_RawWidth-2; col+=3) {
+      bits = get4();
+      for (c=0; c<3; c++) {
+	orow = row;
+	if ((ocol = col+c-4) < 0) {
+	  ocol += m_RawWidth;
+	  if ((orow -= 2) < 0)
+	    orow += m_RawHeight;
+	}
+	RAW(orow,ocol) = m_Curve[bits >> (10*c+2) & 0x3ff];
+      }
+    }
+  m_WhiteLevel = m_Curve[0x3ff];
+}
+
 unsigned CLASS pana_bits (int nbits)
 {
   int byte;
@@ -6340,6 +6360,27 @@ void CLASS parse_riff()
     fseek (m_InputFile, size, SEEK_CUR);
 }
 
+void CLASS parse_qt (int end)
+{
+  unsigned save, size;
+  char tag[4];
+
+  m_ByteOrder = 0x4d4d;
+  while (ftell(m_InputFile)+7 < end) {
+    save = ftell(m_InputFile);
+    if ((size = get4()) < 8) return;
+    fread (tag, 4, 1, m_InputFile);
+    if (!memcmp(tag,"moov",4) ||
+	!memcmp(tag,"udta",4) ||
+	!memcmp(tag,"CNTH",4))
+      parse_qt (save+size);
+    if (!memcmp(tag,"CNDA",4))
+      parse_jpeg (ftell(m_InputFile));
+    fseek (m_InputFile, save+size, SEEK_SET);
+  }
+}
+
+
 void CLASS parse_smal (int offset, int fsize)
 {
   int ver;
@@ -6974,6 +7015,10 @@ void CLASS identify() {
   } else if (!memcmp (l_Head,"RIFF",4)) {
     fseek (m_InputFile, 0, SEEK_SET);
     parse_riff();
+  } else if (!memcmp (l_Head+4,"ftypqt   ",9)) {
+    fseek (m_InputFile, 0, SEEK_SET);
+    parse_qt (l_FileSize);
+    m_IsRaw = 0;
   } else if (!memcmp (l_Head,"\0\001\0\001\0@",6)) {
     fseek (m_InputFile, 6, SEEK_SET);
     ptfread (m_CameraMake, 1, 8, m_InputFile);
@@ -6987,15 +7032,18 @@ void CLASS identify() {
     m_Filters = 0x61616161;
   } else if (!memcmp (l_Head,"NOKIARAW",8)) {
     strcpy (m_CameraMake, "NOKIA");
-    strcpy (m_CameraModel, "X2");
     m_ByteOrder = 0x4949;
     fseek (m_InputFile, 300, SEEK_SET);
     m_Data_Offset = get4();
     i = get4();
     m_Width = get2();
     m_Height = get2();
-    m_Data_Offset += i - m_Width * 5 / 4 * m_Height;
-    m_LoadRawFunction = &CLASS nokia_load_raw;
+    switch (m_Tiff_bps = i*8 / (m_Width * m_Height)) {
+      case  8: m_LoadRawFunction = &CLASS eight_bit_load_raw;  break;
+      case 10: m_LoadRawFunction = &CLASS nokia_load_raw;
+    }
+    m_RawHeight = m_Height + (m_TopMargin = i / (m_Width * m_Tiff_bps/8) - m_Height);
+    m_Mask[0][3] = 1;
     m_Filters = 0x61616161;
   } else if (!memcmp (l_Head,"ARRI",4)) {
     m_ByteOrder = 0x4949;
@@ -7009,9 +7057,20 @@ void CLASS identify() {
     m_LoadRawFunction = &CLASS packed_load_raw;
     m_Load_Flags = 88;
     m_Filters = 0x61616161;
-  } else if (!memcmp (l_Head+4,"RED1",4)) {
-    strcpy (m_CameraMake, "RED");
-    strcpy (m_CameraModel,"ONE");
+  } else if (!memcmp (l_Head,"XPDS",4)) {
+    m_ByteOrder = 0x4949;
+    fseek (m_InputFile, 0x800, SEEK_SET);
+    fread (m_CameraMake, 1, 41, m_InputFile);
+    m_RawHeight = get2();
+    m_RawWidth  = get2();
+    fseek (m_InputFile, 56, SEEK_CUR);
+    fread (m_CameraModel, 1, 30, m_InputFile);
+    m_Data_Offset = 0x10000;
+    m_LoadRawFunction = &CLASS canon_rmf_load_raw;
+    gamma_curve (0, 12.25, 1, 1023);
+ } else if (!memcmp (l_Head+4,"RED1",4)) {
+    strcpy (m_CameraMake, "Red");
+    strcpy (m_CameraModel,"One");
     parse_redcine();
     m_LoadRawFunction = &CLASS redcine_load_raw;
     gamma_curve (1/2.4, 12.92, 1, 4095);
@@ -7026,18 +7085,57 @@ void CLASS identify() {
     parse_foveon();
   else if (!memcmp (l_Head,"CI",2))
     parse_cine();
-  else {
+  if (m_CameraMake[0] == 0){
     for (zero_fsize=i=0; i < sizeof l_Table / sizeof *l_Table; i++)
       if (l_FileSize == (unsigned) l_Table[i].fsize) {
-  strcpy (m_CameraMake,  l_Table[i].make );
-  strcpy (m_CameraModel, l_Table[i].model);
-  if (l_Table[i].flags & 1)
-    parse_external_jpeg();
+        strcpy (m_CameraMake,  l_Table[i].make );
+        strcpy (m_CameraModel, l_Table[i].model);
+        m_Flip = l_Table[i].flags >> 2;
+        m_ZeroIsBad = l_Table[i].flags & 2;
+        if (l_Table[i].flags & 1)
+          parse_external_jpeg();
+	m_Data_Offset = l_Table[i].offset;
+	m_RawWidth   = l_Table[i].rw;
+	m_RawHeight  = l_Table[i].rh;
+	m_LeftMargin = l_Table[i].lm;
+	m_TopMargin = l_Table[i].tm;
+	m_Width  = m_RawWidth - m_LeftMargin - l_Table[i].rm;
+	m_Height = m_RawHeight - m_TopMargin - l_Table[i].bm;
+	m_Filters = 0x1010101 * l_Table[i].cf;
+	m_Colors = 4 - !((m_Filters & m_Filters >> 1) & 0x5555);
+	m_Load_Flags = l_Table[i].lf;
+	switch (m_Tiff_bps = (l_FileSize-m_Data_Offset)*8 / (m_RawWidth*m_RawHeight)) {
+	  case 6:
+	    m_LoadRawFunction = &CLASS minolta_rd175_load_raw;  break;
+	  case 8:
+	    m_LoadRawFunction = &CLASS eight_bit_load_raw;  break;
+	  case 10: case 12:
+	    m_Load_Flags |= 128;
+	    m_LoadRawFunction = &CLASS packed_load_raw;     break;
+	  case 16:
+	    m_ByteOrder = 0x4949 | 0x404 * (m_Load_Flags & 1);
+	    m_Tiff_bps -= m_Load_Flags >> 4;
+	    m_Tiff_bps -= m_Load_Flags = m_Load_Flags >> 1 & 7;
+	    m_LoadRawFunction = &CLASS unpacked_load_raw;
+	}
+	m_WhiteLevel = (1 << m_Tiff_bps) - (1 << l_Table[i].max);
       }
   }
   if (zero_fsize) l_FileSize = 0;
   if (m_CameraMake[0] == 0) parse_smal (0, l_FLen);
-  if (m_CameraMake[0] == 0) parse_jpeg (m_IsRaw = 0);
+  if (m_CameraMake[0] == 0) {
+    parse_jpeg(0);
+    if (!(strncmp(m_CameraModel,"ov",2) && strncmp(m_CameraModel,"RP_OV",5)) &&
+	!fseek (m_InputFile, -6404096, SEEK_END) &&
+	fread (l_Head, 1, 32, m_InputFile) && !strcmp(l_Head,"BRCMn")) {
+      strcpy (m_CameraMake, "OmniVision");
+      m_Data_Offset = ftell(m_InputFile) + 0x8000-32;
+      m_Width = m_RawWidth;
+      m_RawWidth = 2611;
+      m_LoadRawFunction = &CLASS nokia_load_raw;
+      m_Filters = 0x16161616;
+    } else m_IsRaw = 0;
+  }
 
   for (i=0; i < sizeof l_Corporation / sizeof *l_Corporation; i++)
     if (strcasestr (m_CameraMake, l_Corporation[i])) /* Simplify company names */
@@ -7076,6 +7174,8 @@ void CLASS identify() {
     { m_LeftMargin = 10; m_Width  = 4950; m_Filters = 0x16161616; }
   if (m_Width == 4736 && !strcmp(m_CameraModel,"K-7"))
     { m_Height  = 3122;   m_Width  = 4684; m_Filters = 0x16161616; m_TopMargin = 2; }
+  if (m_Width == 6080 && !strcmp(m_CameraModel,"K-3"))
+    { m_LeftMargin = 4;  m_Width  = 6040; }
   if (m_Width == 7424 && !strcmp(m_CameraModel,"645D"))
     { m_Height  = 5502;   m_Width  = 7328; m_Filters = 0x61616161; m_TopMargin = 29;
       m_LeftMargin = 48; }
@@ -7083,34 +7183,60 @@ void CLASS identify() {
       m_Width  = 4014;
   if (m_DNG_Version) {
     if (m_Filters == UINT_MAX) m_Filters = 0;
-    if (m_Filters) m_IsRaw = m_Tiff_Samples;
+    if (m_Filters) m_IsRaw *= m_Tiff_Samples;
     else   m_Colors = m_Tiff_Samples;
-    if (m_Tiff_Compress == 1)
-      m_LoadRawFunction = &CLASS packed_dng_load_raw;
-    if (m_Tiff_Compress == 7)
-      m_LoadRawFunction = &CLASS lossless_dng_load_raw;
+    switch (m_Tiff_Compress) {
+      case 0:
+      case 1:     m_LoadRawFunction = &CLASS   packed_dng_load_raw;  break;
+      case 7:     m_LoadRawFunction = &CLASS lossless_dng_load_raw;  break;
+      case 34892: m_LoadRawFunction = &CLASS    lossy_dng_load_raw;  break;
+      default:    m_LoadRawFunction = 0;
+    }
     goto dng_skip;
   }
-  if ((l_IsCanon = !strcmp(m_CameraMake,"Canon"))) {
-    m_LoadRawFunction = memcmp (l_Head+6,"HEAPCCDR",8) ?
-  &CLASS lossless_jpeg_load_raw : &CLASS canon_load_raw;
+  if (!strcmp(m_CameraMake,"Canon") && !l_FileSize && m_Tiff_bps != 15) {
+    if (!m_LoadRawFunction)
+      m_LoadRawFunction = &CLASS lossless_jpeg_load_raw;
+    for (i=0; i < sizeof canon / sizeof *canon; i++)
+      if (m_RawWidth == canon[i][0] && m_RawHeight == canon[i][1]) {
+	m_Width  = m_RawWidth - (m_LeftMargin = canon[i][2]);
+	m_Height = m_RawHeight - (m_TopMargin = canon[i][3]);
+	m_Width  -= canon[i][4];
+	m_Height -= canon[i][5];
+	m_Mask[0][1] =  canon[i][6];
+	m_Mask[0][3] = -canon[i][7];
+	m_Mask[1][1] =  canon[i][8];
+	m_Mask[1][3] = -canon[i][9];
+	if (canon[i][10]) m_Filters = canon[i][10] * 0x01010101;
+      }
+    if ((unique_id | 0x20000) == 0x2720000) {
+      m_LeftMargin = 8;
+      m_TopMargin = 16;
+    }
   }
-  if (!strcmp(m_CameraMake,"NIKON")) {
+  for (i=0; i < sizeof unique / sizeof *unique; i++)
+    if (unique_id == 0x80000000 + unique[i].id) {
+      adobe_coeff ("Canon", unique[i].model);
+      if (m_CameraModel[4] == 'K' && strlen(m_CameraModel) == 8)
+	strcpy (m_CameraModel, unique[i].model);
+    }
+  for (i=0; i < sizeof sonique / sizeof *sonique; i++)
+    if (unique_id == sonique[i].id)
+      strcpy (m_CameraModel, sonique[i].model);
+  if (!strcmp(m_CameraMake,"Nikon")) {
     if (!m_LoadRawFunction)
       m_LoadRawFunction = &CLASS packed_load_raw;
     if (m_CameraModel[0] == 'E')
       m_Load_Flags |= !m_Data_Offset << 2 | 2;
   }
-  if (!strcmp(m_CameraMake,"CASIO")) {
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_WhiteLevel = 0xf7f;
-  }
-  for (i=0; i < sizeof sonique / sizeof *sonique; i++)
-    if (unique_id == sonique[i].id)
-      strcpy (m_CameraModel, sonique[i].model);
- 
 /* Set parameters based on camera name (for non-DNG files). */
 
+  if (!strcmp(m_CameraModel,"KAI-0340")
+	&& find_green (16, 16, 3840, 5120) < 25) {
+    m_Height = 480;
+    m_TopMargin = m_Filters = 0;
+    strcpy (m_CameraModel,"C603");
+  }
   if (!strcmp(m_CameraMake,"Sony") && m_RawWidth > 3888)
     m_BlackLevel = 128 << (m_Tiff_bps - 12);
   if (m_IsFoveon) {
@@ -7118,19 +7244,26 @@ void CLASS identify() {
     if (m_Height   > m_Width) m_PixelAspect = 2;
     m_Filters = 0;
     simple_coeff(0);
-  } else if (l_IsCanon && m_Tiff_bps == 15) {
+  } else if (!strcmp(m_CameraMake,"Canon") && m_Tiff_bps == 15) {
     switch (m_Width) {
       case 3344: m_Width -= 66;
       case 3872: m_Width -= 6;
     }
-    if (m_Height > m_Width) SWAP(m_Height,m_Width);
+    if (m_Height > m_Width) {
+      SWAP(m_Height,m_Width);
+      SWAP(m_RawHeight,m_RawWidth);
+    }
+    if (m_Width == 7200 && m_Height == 3888) {
+      m_RawWidth  = m_Width  = 6480;
+      m_RawHeight = m_Height = 4320;
+    }
     m_Filters = 0;
+    m_Tiff_Samples = m_Colors = 3;
     m_LoadRawFunction = &CLASS canon_sraw_load_raw;
   } else if (!strcmp(m_CameraModel,"PowerShot 600")) {
     m_Height = 613;
     m_Width  = 854;
     m_RawWidth = 896;
-    m_PixelAspect = 607/628.0;
     m_Colors = 4;
     m_Filters = 0xe1e4e1e4;
     m_LoadRawFunction = &CLASS canon_600_load_raw;
@@ -7140,362 +7273,34 @@ void CLASS identify() {
     m_Width  = 960;
     m_RawWidth = 992;
     m_PixelAspect = 256/235.0;
-    m_Colors = 4;
     m_Filters = 0x1e4e1e4e;
     goto canon_a5;
   } else if (!strcmp(m_CameraModel,"PowerShot A50")) {
     m_Height =  968;
     m_Width  = 1290;
     m_RawWidth = 1320;
-    m_Colors = 4;
     m_Filters = 0x1b4e4b1e;
     goto canon_a5;
   } else if (!strcmp(m_CameraModel,"PowerShot Pro70")) {
     m_Height = 1024;
     m_Width  = 1552;
-    m_Colors = 4;
     m_Filters = 0x1e4b4e1b;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot SD300")) {
-    m_Height = 1752;
-    m_Width  = 2344;
-    m_RawHeight = 1766;
-    m_RawWidth  = 2400;
-    m_TopMargin  = 12;
-    m_LeftMargin = 12;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot A460")) {
-    m_Height = 1960;
-    m_Width  = 2616;
-    m_RawHeight = 1968;
-    m_RawWidth  = 2664;
-    m_TopMargin  = 4;
-    m_LeftMargin = 4;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot A530")) {
-    m_Height = 1984;
-    m_Width  = 2620;
-    m_RawHeight = 1992;
-    m_RawWidth  = 2672;
-    m_TopMargin  = 6;
-    m_LeftMargin = 10;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot A610")) {
-    if (canon_s2is()) strcpy (m_CameraModel+10, "S2 IS");
-    m_Height = 1960;
-    m_Width  = 2616;
-    m_RawHeight = 1968;
-    m_RawWidth  = 2672;
-    m_TopMargin  = 8;
-    m_LeftMargin = 12;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot A620")) {
-    m_Height = 2328;
-    m_Width  = 3112;
-    m_RawHeight = 2340;
-    m_RawWidth  = 3152;
-    m_TopMargin  = 12;
-    m_LeftMargin = 36;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot A470")) {
-    m_Height = 2328;
-    m_Width  = 3096;
-    m_RawHeight = 2346;
-    m_RawWidth  = 3152;
-    m_TopMargin  = 6;
-    m_LeftMargin = 12;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot A720 IS")) {
-    m_Height = 2472;
-    m_Width  = 3298;
-    m_RawHeight = 2480;
-    m_RawWidth  = 3336;
-    m_TopMargin  = 5;
-    m_LeftMargin = 6;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot A630")) {
-    m_Height = 2472;
-    m_Width  = 3288;
-    m_RawHeight = 2484;
-    m_RawWidth  = 3344;
-    m_TopMargin  = 6;
-    m_LeftMargin = 12;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot A640")) {
-    m_Height = 2760;
-    m_Width  = 3672;
-    m_RawHeight = 2772;
-    m_RawWidth  = 3736;
-    m_TopMargin  = 6;
-    m_LeftMargin = 12;
-    goto canon_a5;
- } else if (!strcmp(m_CameraModel,"PowerShot A650")) {
-    m_Height = 3024;
-    m_Width  = 4032;
-    m_RawHeight = 3048;
-    m_RawWidth  = 4104;
-    m_TopMargin  = 12;
-    m_LeftMargin = 48;
-    goto canon_a5;
-  } else if (!strcmp(m_CameraModel,"PowerShot S3 IS")) {
-    m_Height = 2128;
-    m_Width  = 2840;
-    m_RawHeight = 2136;
-    m_RawWidth  = 2888;
-    m_TopMargin  = 8;
-    m_LeftMargin = 44;
 canon_a5:
+    m_Colors = 4;
     m_Tiff_bps = 10;
     m_LoadRawFunction = &CLASS packed_load_raw;
     m_Load_Flags = 40;
-    if (m_RawWidth > 1600) m_ZeroIsBad = 1;
-  } else if (!strcmp(m_CameraModel,"PowerShot SX110 IS")) {
-    m_Height = 2760;
-    m_Width  = 3684;
-    m_RawHeight = 2772;
-    m_RawWidth  = 3720;
-    m_TopMargin  = 12;
-    m_LeftMargin = 6;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 40;
-    m_ZeroIsBad = 1;
-  } else if (!strcmp(m_CameraModel,"PowerShot SX120 IS")) {
-    m_Height = 2742;
-    m_Width  = 3664;
-    m_RawHeight = 2778;
-    m_RawWidth  = 3728;
-    m_TopMargin  = 18;
-    m_LeftMargin = 16;
-    m_Filters = 0x49494949;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 40;
-    m_ZeroIsBad = 1;
-  } else if (!strcmp(m_CameraModel,"PowerShot SX20 IS")) {
-    m_Height = 3024;
-    m_Width  = 4032;
-    m_RawHeight = 3048;
-    m_RawWidth  = 4080;
-    m_TopMargin  = 12;
-    m_LeftMargin = 24;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 40;
-    m_ZeroIsBad = 1;
-  } else if (!strcmp(m_CameraModel,"PowerShot SX220 HS")) {
-    m_Height = 3043;
-    m_Width  = 4072;
-    m_RawHeight = 3060;
-    m_RawWidth  = 4168;
-    m_Mask[0][0] = m_TopMargin = 16;
-    m_Mask[0][2] = m_TopMargin + m_Height;
-    m_Mask[0][3] = m_LeftMargin = 92;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 8;
-    m_ZeroIsBad = 1;
-  } else if (!strcmp(m_CameraModel,"PowerShot SX30 IS")) {
-    m_Height = 3254;
-    m_Width  = 4366;
-    m_RawHeight = 3276;
-    m_RawWidth  = 4464;
-    m_TopMargin  = 10;
-    m_LeftMargin = 25;
-    m_Filters = 0x16161616;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 40;
-    m_ZeroIsBad = 1;
-  } else if (!strcmp(m_CameraModel,"PowerShot Pro90 IS")) {
-    m_Width  = 1896;
+  } else if (!strcmp(m_CameraModel,"PowerShot Pro90 IS") ||
+	     !strcmp(m_CameraModel,"PowerShot G1")) {
     m_Colors = 4;
     m_Filters = 0xb4b4b4b4;
-  } else if (l_IsCanon && m_RawWidth == 2144) {
-    m_Height = 1550;
-    m_Width  = 2088;
-    m_TopMargin  = 8;
-    m_LeftMargin = 4;
-    if (!strcmp(m_CameraModel,"PowerShot G1")) {
-      m_Colors = 4;
-      m_Filters = 0xb4b4b4b4;
-    }
-  } else if (l_IsCanon && m_RawWidth == 2224) {
-    m_Height = 1448;
-    m_Width  = 2176;
-    m_TopMargin  = 6;
-    m_LeftMargin = 48;
-  } else if (l_IsCanon && m_RawWidth == 2376) {
-    m_Height = 1720;
-    m_Width  = 2312;
-    m_TopMargin  = 6;
-    m_LeftMargin = 12;
-  } else if (l_IsCanon && m_RawWidth == 2672) {
-    m_Height = 1960;
-    m_Width  = 2616;
-    m_TopMargin  = 6;
-    m_LeftMargin = 12;
-  } else if (l_IsCanon && m_RawWidth == 3152) {
-    m_Height = 2056;
-    m_Width  = 3088;
-    m_TopMargin  = 12;
-    m_LeftMargin = 64;
-    if (unique_id == 0x80000170)
-      adobe_coeff ("Canon","EOS 300D");
-  } else if (l_IsCanon && m_RawWidth == 3160) {
-    m_Height = 2328;
-    m_Width  = 3112;
-    m_TopMargin  = 12;
-    m_LeftMargin = 44;
-  } else if (l_IsCanon && m_RawWidth == 3344) {
-    m_Height = 2472;
-    m_Width  = 3288;
-    m_TopMargin  = 6;
-    m_LeftMargin = 4;
+  } else if (!strcmp(m_CameraModel,"PowerShot A610")) {
+    if (canon_s2is()) strcpy (m_CameraModel+10, "S2 IS");
+  } else if (!strcmp(m_CameraModel,"PowerShot SX220 HS")) {
+    m_Mask[1][3] = -4;
   } else if (!strcmp(m_CameraModel,"EOS D2000C")) {
     m_Filters = 0x61616161;
     m_BlackLevel = m_Curve[200];
-  } else if (l_IsCanon && m_RawWidth == 3516) {
-    m_TopMargin  = 14;
-    m_LeftMargin = 42;
-    if (unique_id == 0x80000189)
-      adobe_coeff ("Canon","EOS 350D");
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 3596) {
-    m_TopMargin  = 12;
-    m_LeftMargin = 74;
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 3744) {
-    m_Height = 2760;
-    m_Width  = 3684;
-    m_TopMargin  = 16;
-    m_LeftMargin = 8;
-    if (unique_id > 0x2720000) {
-      m_TopMargin  = 12;
-      m_LeftMargin = 52;
-    }
-  } else if (l_IsCanon && m_RawWidth == 3944) {
-    m_Height = 2602;
-    m_Width  = 3908;
-    m_TopMargin  = 18;
-    m_LeftMargin = 30;
-  } else if (l_IsCanon && m_RawWidth == 3948) {
-    m_TopMargin  = 18;
-    m_LeftMargin = 42;
-    m_Height -= 2;
-    if (unique_id == 0x80000236)
-      adobe_coeff ("Canon","EOS 400D");
-    if (unique_id == 0x80000254)
-      adobe_coeff ("Canon","EOS 1000D");
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 3984) {
-    m_TopMargin  = 20;
-    m_LeftMargin = 76;
-    m_Height -= 2;
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 4104) {
-    m_Height = 3024;
-    m_Width  = 4032;
-    m_TopMargin  = 12;
-    m_LeftMargin = 48;
- } else if (l_IsCanon && m_RawWidth == 4152) {
-    m_TopMargin  = 12;
-    m_LeftMargin = 192;
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 4160) {
-    m_Height = 3048;
-    m_Width  = 4048;
-    m_TopMargin  = 11;
-    m_LeftMargin = 104;
-  } else if (l_IsCanon && m_RawWidth == 4176) {
-    m_Height = 3045;
-    m_Width  = 4072;
-    m_LeftMargin = 96;
-    m_Mask[0][0] = m_TopMargin = 17;
-    m_Mask[0][2] = m_RawHeight;
-    m_Mask[0][3] = 80;
-    m_Filters = 0x49494949;
-  } else if (l_IsCanon && m_RawWidth == 4312) {
-    m_TopMargin  = 18;
-    m_LeftMargin = 22;
-    m_Height -= 2;
-    if (unique_id == 0x80000176)
-      adobe_coeff ("Canon","EOS 450D");
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 4352) {
-    m_TopMargin  = 18;
-    m_LeftMargin = 62;
-    if (unique_id == 0x80000288)
-      adobe_coeff ("Canon","EOS 1100D");
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 4476) {
-    m_TopMargin  = 34;
-    m_LeftMargin = 90;
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 4480) {
-    m_Height = 3326;
-    m_Width  = 4432;
-    m_TopMargin  = 10;
-    m_LeftMargin = 12;
-    m_Filters = 0x49494949;
-  } else if (l_IsCanon && m_RawWidth == 4496) {
-    m_Height = 3316;
-    m_Width  = 4404;
-    m_TopMargin  = 50;
-    m_LeftMargin = 80;
-  } else if (l_IsCanon && m_RawWidth == 4832) {
-    m_TopMargin = unique_id == 0x80000261 ? 51:26;
-    m_LeftMargin = 62;
-    if (unique_id == 0x80000252)
-      adobe_coeff ("Canon","EOS 500D");
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 5108) {
-    m_TopMargin  = 13;
-    m_LeftMargin = 98;
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 5120) {
-    m_Height -= m_TopMargin = 45;
-    m_LeftMargin = 142;
-    m_Width = 4916;
-  } else if (l_IsCanon && m_RawWidth == 5280) {
-    m_TopMargin  = 52;
-    m_LeftMargin = 72;
-    if (unique_id == 0x80000301)
-      adobe_coeff ("Canon","EOS 650D");
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 5344) {
-    m_TopMargin = 51;
-    m_LeftMargin = 142;
-    if (unique_id == 0x80000269) {
-      m_TopMargin = 100;
-      m_LeftMargin = 126;
-      m_Height -= 2;
-      adobe_coeff ("Canon","EOS-1D X");
-    }
-    if (unique_id == 0x80000270)
-      adobe_coeff ("Canon","EOS 550D");
-    if (unique_id == 0x80000286)
-      adobe_coeff ("Canon","EOS 600D");
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 5360) {
-    m_TopMargin = 51;
-    m_LeftMargin = 158;
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 5568) {
-    m_TopMargin = 38;
-    m_LeftMargin = 72;
-    goto canon_cr2;
-  } else if (l_IsCanon && m_RawWidth == 5712) {
-    m_Height = 3752;
-    m_Width  = 5640;
-    m_TopMargin  = 20;
-    m_LeftMargin = 62;
-  } else if (l_IsCanon && m_RawWidth == 5792) {
-    m_TopMargin  = 51;
-    m_LeftMargin = 158;
-canon_cr2:
-    m_Height -= m_TopMargin;
-    m_Width  -= m_LeftMargin;
-  } else if (l_IsCanon && m_RawWidth == 5920) {
-    m_Height = 3870;
-    m_Width  = 5796;
-    m_TopMargin  = 80;
-    m_LeftMargin = 122;
   } else if (!strcmp(m_CameraModel,"D1")) {
     ASSIGN(m_CameraMultipliers[0],VALUE(m_CameraMultipliers[0]) * 256/527.0);
     ASSIGN(m_CameraMultipliers[2],VALUE(m_CameraMultipliers[2]) * 256/317.0);
@@ -7517,16 +7322,18 @@ canon_cr2:
     m_Width -= 28;
     m_LeftMargin = 6;
   } else if (!strcmp(m_CameraModel,"D5000") ||
-       !strcmp(m_CameraModel,"D90")) {
+             !strcmp(m_CameraModel,"D90")) {
     m_Width -= 42;
   } else if (!strcmp(m_CameraModel,"D5100") ||
-       !strcmp(m_CameraModel,"D7000")) {
+             !strcmp(m_CameraModel,"D7000") || 
+             !strcmp(m_CameraModel,"COOLPIX A")) {
     m_Width -= 44;
   } else if (!strcmp(m_CameraModel,"D3200") ||
-	     !strcmp(m_CameraModel,"D600")  ||
-       !strcmp(m_CameraModel,"D800")) {
+	     !strncmp(m_CameraModel,"D6",2)  ||
+             !strncmp(m_CameraModel,"D800",4)) {
     m_Width -= 46;
-  } else if (!strcmp(m_CameraModel,"D4")) {
+  } else if (!strcmp(m_CameraModel,"D4") ||
+             !strcmp(m_CameraModel,"Df")) {
     m_Width -= 52;
     m_LeftMargin = 2;
   } else if (!strncmp(m_CameraModel,"D40",3) ||
@@ -7548,9 +7355,7 @@ canon_cr2:
     else m_Width -= 8;
   } else if (!strncmp(m_CameraModel,"D300",4)) {
     m_Width -= 32;
-  } else if (!strcmp(m_CameraMake,"NIKON") && m_RawWidth == 4032) {
-    adobe_coeff ("NIKON","COOLPIX P7700");
-  } else if (!strncmp(m_CameraModel,"COOLPIX P",9)) {
+  } else if (!strncmp(m_CameraModel,"COOLPIX P",9) && m_RawWidth != 4032) {
     m_Load_Flags = 24;
     m_Filters = 0x94949494;
     if (m_CameraModel[9] == '7' && m_IsoSpeed >= 400)
@@ -7558,35 +7363,14 @@ canon_cr2:
   } else if (!strncmp(m_CameraModel,"1 ",2)) {
     m_Height -= 2;
   } else if (l_FileSize == 1581060) {
-    m_Height = 963;
-    m_Width = 1287;
-    m_RawWidth = 1632;
-    m_WhiteLevel = 0x3f4;
-    m_Colors = 4;
-    m_Filters = 0x1e1e1e1e;
     simple_coeff(3);
     ASSIGN(m_D65Multipliers[0], 1.2085);
     ASSIGN(m_D65Multipliers[1], 1.0943);
     ASSIGN(m_D65Multipliers[3], 1.1103);
-    goto e900;
-  } else if (l_FileSize == 2465792) {
-    m_Height = 1203;
-    m_Width  = 1616;
-    m_RawWidth = 2048;
-    m_Colors = 4;
-    m_Filters = 0x4b4b4b4b;
-    adobe_coeff ("NIKON","E950");
-e900:
-    m_Tiff_bps = 10;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 6;
+  } else if (l_FileSize == 3178560) {
+    ASSIGN(m_CameraMultipliers[0],VALUE(m_CameraMultipliers[0]) * 4);
+    ASSIGN(m_CameraMultipliers[2],VALUE(m_CameraMultipliers[2]) * 4);
   } else if (l_FileSize == 4771840) {
-    m_Height = 1540;
-    m_Width  = 2064;
-    m_Colors = 4;
-    m_Filters = 0xe1e1e1e1;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 6;
     if (!m_TimeStamp && nikon_e995())
       strcpy (m_CameraModel, "E995");
     if (strcmp(m_CameraModel,"E995")) {
@@ -7596,23 +7380,16 @@ e900:
       ASSIGN(m_D65Multipliers[1], 1.246);
       ASSIGN(m_D65Multipliers[2], 1.018);
     }
-  } else if (!strcmp(m_CameraModel,"E2100")) {
-    if (!m_TimeStamp && !nikon_e2100()) goto cp_e2500;
-    m_Height = 1206;
-    m_Width  = 1616;
-    m_Load_Flags = 30;
-  } else if (!strcmp(m_CameraModel,"E2500")) {
-cp_e2500:
-    strcpy (m_CameraModel, "E2500");
-    m_Height = 1204;
-    m_Width  = 1616;
-    m_Colors = 4;
-    m_Filters = 0x4b4b4b4b;
+  } else if (l_FileSize == 2940928) {
+    if (!m_TimeStamp && !nikon_e2100())
+      strcpy (m_CameraModel, "E2500");
+    if (!strcmp(m_CameraModel,"E2500")) {
+      m_Height -= 2;
+      m_Load_Flags = 6;
+      m_Colors = 4;
+      m_Filters = 0x4b4b4b4b;
+    }
   } else if (l_FileSize == 4775936) {
-    m_Height = 1542;
-    m_Width  = 2064;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 30;
     if (!m_TimeStamp) nikon_3700();
     if (m_CameraModel[0] == 'E' && atoi(m_CameraModel+1) < 3700)
       m_Filters = 0x49494949;
@@ -7630,32 +7407,21 @@ cp_e2500:
       if (li < 0) m_Filters = 0x61616161;
     }
   } else if (l_FileSize == 5869568) {
-    m_Height = 1710;
-    m_Width  = 2288;
-    m_Filters = 0x16161616;
     if (!m_TimeStamp && minolta_z2()) {
       strcpy (m_CameraMake, "Minolta");
       strcpy (m_CameraModel,"DiMAGE Z2");
     }
-    m_LoadRawFunction = &CLASS packed_load_raw;
     m_Load_Flags = 6 + 24 * (m_CameraMake[0] == 'M');
-  } else if (!strcmp(m_CameraModel,"E4500")) {
-    m_Height = 1708;
-    m_Width  = 2288;
-    m_Colors = 4;
-    m_Filters = 0xb4b4b4b4;
-  } else if (l_FileSize == 7438336) {
-    m_Height = 1924;
-    m_Width  = 2576;
-    m_Colors = 4;
-    m_Filters = 0xb4b4b4b4;
-  } else if (l_FileSize == 8998912) {
-    m_Height = 2118;
-    m_Width  = 2832;
-    m_WhiteLevel = 0xf83;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 30;
- } else if (!strcmp(m_CameraMake,"FUJIFILM")) {
+  } else if (l_FileSize == 6291456) {
+    fseek (m_InputFile, 0x300000, SEEK_SET);
+    if ((m_ByteOrder = guess_byte_order(0x10000)) == 0x4d4d) {
+      m_Height -= (m_TopMargin = 16);
+      m_Width -= (m_LeftMargin = 28);
+      m_WhiteLevel = 0xf5c0;
+      strcpy (m_CameraMake, "ISG");
+      m_CameraModel[0] = 0;
+    }
+ } else if (!strcmp(m_CameraMake,"Fujifilm")) {
     if (!strcmp(m_CameraModel+7,"S2Pro")) {
       strcpy (m_CameraModel,"S2Pro");
       m_Height = 2144;
@@ -7665,6 +7431,7 @@ cp_e2500:
       m_WhiteLevel = (m_IsRaw == 2 && m_UserSetting_ShotSelect) ? 0x2f00 : 0x3e00;
     m_TopMargin = (m_RawHeight - m_Height) >> 2 << 1;
     m_LeftMargin = (m_RawWidth - m_Width ) >> 2 << 1;
+    /*function identify converted up to this point*/
     if (m_Width == 2848) m_Filters = 0x16161616;
     if (m_Width == 3328) {
       m_Width = 3262;

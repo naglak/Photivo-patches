@@ -563,6 +563,7 @@ public:
   char *foveon_gets(int offset,char *str,int len);
   void  parse_cine();
   void  parse_smal(int offset,int fsize);
+  void  parse_qt (int end);
   void  parse_riff();
   int   parse_jpeg(int offset);
   void  parse_fuji(int offset);
@@ -641,6 +642,7 @@ public:
   void  olympus_load_raw();
   void  panasonic_load_raw();
   void  nokia_load_raw();
+  void  canon_rmf_load_raw();
   unsigned  pana_bits(int nbits);
   void  packed_load_raw();
   void  imacon_full_load_raw();
