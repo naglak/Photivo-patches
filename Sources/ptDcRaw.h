@@ -432,6 +432,8 @@ public:
   FILE*     m_InputFile;
   FILE*     m_OutputFile;
   char*     m_MetaData;
+  char      xtrans[6][6];
+  char      xtrans_abs[6][6];
   unsigned  m_ThumbMisc;
   char      m_Description[512];
   unsigned  m_ShotOrder;
@@ -626,6 +628,8 @@ public:
   void  kodak_ycbcr_load_raw();
   void  kodak_65000_load_raw();
   int   kodak_65000_decode(short *out,int bsize);
+  void  kodak_c330_load_raw();
+  void  kodak_c603_load_raw();
   void  kodak_262_load_raw();
   void  kodak_yrgb_load_raw();
   void  eight_bit_load_raw();

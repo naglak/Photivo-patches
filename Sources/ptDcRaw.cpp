@@ -2355,6 +2355,56 @@ void CLASS eight_bit_load_raw()
   m_WhiteLevel = m_Curve[0xff];
 }
 
+void CLASS kodak_c330_load_raw()
+{
+  uchar *pixel;
+  int row, col, y, cb, cr, rgb[3], c;
+
+  pixel = (uchar *) calloc (m_RawWidth, 2*sizeof *pixel);
+  merror (pixel, "kodak_c330_load_raw()");
+  for (row=0; row < m_Height; row++) {
+    if (fread (pixel, m_RawWidth, 2, m_InputFile) < 2) derror();
+    if (m_Load_Flags && (row & 31) == 31)
+      fseek (m_InputFile, m_RawWidth*32, SEEK_CUR);
+    for (col=0; col < m_Width; col++) {
+      y  = pixel[col*2];
+      cb = pixel[(col*2 & -4) | 1] - 128;
+      cr = pixel[(col*2 & -4) | 3] - 128;
+      rgb[1] = y - ((cb + cr + 2) >> 2);
+      rgb[2] = rgb[1] + cb;
+      rgb[0] = rgb[1] + cr;
+      for (c=0; c<3; c++) m_Image[row*m_Width+col][c] = m_Curve[LIM(rgb[c],0,255)];
+    }
+  }
+  free (pixel);
+  m_WhiteLevel = m_Curve[0xff];
+}
+
+void CLASS kodak_c603_load_raw()
+{
+  uchar *pixel;
+  int row, col, y, cb, cr, rgb[3], c;
+
+  pixel = (uchar *) calloc (m_RawWidth, 3*sizeof *pixel);
+  merror (pixel, "kodak_c603_load_raw()");
+  for (row=0; row < m_Height; row++) {
+    if (~row & 1)
+      if (fread (pixel, m_RawWidth, 3, m_InputFile) < 3) derror();
+    for (col=0; col < m_Width; col++) {
+      y  = pixel[m_Width*2*(row & 1) + col];
+      cb = pixel[m_Width + (col & -2)]   - 128;
+      cr = pixel[m_Width + (col & -2)+1] - 128;
+      rgb[1] = y - ((cb + cr + 2) >> 2);
+      rgb[2] = rgb[1] + cb;
+      rgb[0] = rgb[1] + cr;
+      for (c=0; c<3; c++) m_Image[row*m_Width+col][c] = m_Curve[LIM(rgb[c],0,255)];
+    }
+  }
+  free (pixel);
+  m_WhiteLevel = m_Curve[0xff];
+}
+
+
 void CLASS kodak_yrgb_load_raw()
 {
   uint8_t *pixel;
@@ -7431,23 +7481,20 @@ canon_a5:
       m_WhiteLevel = (m_IsRaw == 2 && m_UserSetting_ShotSelect) ? 0x2f00 : 0x3e00;
     m_TopMargin = (m_RawHeight - m_Height) >> 2 << 1;
     m_LeftMargin = (m_RawWidth - m_Width ) >> 2 << 1;
-    /*function identify converted up to this point*/
-    if (m_Width == 2848) m_Filters = 0x16161616;
-    if (m_Width == 3328) {
-      m_Width = 3262;
-      m_LeftMargin = 34;
-    }
-    if (m_Width == 4952) {
+    if (m_Width == 2848 || m_Width == 3664) m_Filters = 0x16161616;
+    if (m_Width == 4032 || m_Width == 4952 || m_Width == 6032) m_LeftMargin = 0;
+    if (m_Width == 3328 && (m_Width -= 66)) m_LeftMargin = 34;
+    if (m_Width == 4936) m_LeftMargin = 4;
+    if (!strcmp(m_CameraModel,"HS50EXR") ||
+	!strcmp(m_CameraModel,"F900EXR")) {
+      m_Width += 2;
       m_LeftMargin = 0;
-      m_Filters = 2;
+      m_Filters = 0x16161616;
     }
     if (fuji_layout) m_RawWidth *= m_IsRaw;
-  } else if (!strcmp(m_CameraModel,"RD175")) {
-    m_Height = 986;
-    m_Width = 1534;
-    m_Data_Offset = 513;
-    m_Filters = 0x61616161;
-    m_LoadRawFunction = &CLASS minolta_rd175_load_raw;
+    if (m_Filters == 9)
+      for (c=0; c < 36; c++) ((char *)xtrans)[c] =
+	xtrans_abs[(c/6+m_TopMargin) % 6][(c+m_LeftMargin) % 6];
   } else if (!strcmp(m_CameraModel,"KD-400Z")) {
     m_Height = 1712;
     m_Width  = 2312;
@@ -7455,9 +7502,9 @@ canon_a5:
     goto konica_400z;
   } else if (!strcmp(m_CameraModel,"KD-510Z")) {
     goto konica_510z;
-  } else if (!strcasecmp(m_CameraMake,"MINOLTA")) {
-    m_LoadRawFunction = &CLASS unpacked_load_raw;
-    m_WhiteLevel = 0xfff;
+  } else if (!strcasecmp(m_CameraMake,"Minolta")) {
+    if (!m_LoadRawFunction && (m_WhiteLevel = 0xfff))
+      m_LoadRawFunction = &CLASS unpacked_load_raw;
     if (!strncmp(m_CameraModel,"DiMAGE A",8)) {
       if (!strcmp(m_CameraModel,"DiMAGE A200"))
   m_Filters = 0x49494949;
@@ -7494,58 +7541,32 @@ konica_400z:
     data_error = -1;
   } else if (!strcmp(m_CameraModel,"*ist DS")) {
     m_Height -= 2;
-  } else if (!strcmp(m_CameraModel,"K-x")) {
-    m_Width = 4309;
-    m_Filters = 0x16161616;
-  } else if (!strcmp(m_CameraModel,"Optio S")) {
-    if (l_FileSize == 3178560) {
-      m_Height = 1540;
-      m_Width  = 2064;
-      m_LoadRawFunction = &CLASS eight_bit_load_raw;
-      ASSIGN(m_CameraMultipliers[0],VALUE(m_CameraMultipliers[0]) * 4);
-      ASSIGN(m_CameraMultipliers[2],VALUE(m_CameraMultipliers[2]) * 4);
-    } else {
-      m_Height = 1544;
-      m_Width  = 2068;
-      m_RawWidth = 3136;
-      m_LoadRawFunction = &CLASS packed_load_raw;
-      m_WhiteLevel = 0xf7c;
-    }
-  } else if (l_FileSize == 6114240) {
-    m_Height = 1737;
-    m_Width  = 2324;
-    m_RawWidth = 3520;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_WhiteLevel = 0xf7a;
-  } else if (!strcmp(m_CameraModel,"Optio 750Z")) {
-    m_Height = 2302;
-    m_Width  = 3072;
-    m_LoadRawFunction = &CLASS packed_load_raw;
-    m_Load_Flags = 30;
-  } else if (!strcmp(m_CameraModel,"DC-833m")) {
-    m_Height = 2448;
-    m_Width  = 3264;
-    m_ByteOrder = 0x4949;
-    m_Filters = 0x61616161;
-    m_LoadRawFunction = &CLASS unpacked_load_raw;
-    m_WhiteLevel = 0xfc00;
-  } else if (!strncmp(m_CameraModel,"S85",3)) {
-    m_Height = 2448;
-    m_Width  = 3264;
-    m_RawWidth = l_FileSize/m_Height/2;
-    m_ByteOrder = 0x4d4d;
-    m_LoadRawFunction = &CLASS unpacked_load_raw;
-  } else if (!strcmp(m_CameraMake,"SAMSUNG") && m_RawWidth == 4704) {
+  } else if (!strcmp(m_CameraMake,"Samsung") && m_RawWidth == 4704) {
     m_Height -= m_TopMargin = 8;
     m_Width -= 2 * (m_LeftMargin = 8);
     m_Load_Flags = 32;
-  } else if (!strcmp(m_CameraMake,"SAMSUNG") && m_RawWidth == 5632) {
+  } else if (!strcmp(m_CameraMake,"Samsung") && m_RawHeight == 3714) {
+    m_Height -= m_TopMargin = 18;
+    m_LeftMargin = m_RawWidth - (m_Width = 5536);
+    if (m_RawWidth != 5600)
+      m_LeftMargin = m_TopMargin = 0;
+    m_Filters = 0x61616161;
+    m_Colors = 3;
+  } else if (!strcmp(m_CameraMake,"Samsung") && m_RawWidth == 5632) {
     m_ByteOrder = 0x4949;
     m_Height = 3694;
     m_TopMargin = 2;
     m_Width  = 5574 - (m_LeftMargin = 32 + m_Tiff_bps);
     if (m_Tiff_bps == 12) m_Load_Flags = 80;
-  } else if (!strcmp(m_CameraModel,"EX1")) {
+  } else if (!strcmp(m_CameraMake,"Samsung") && m_RawWidth == 5664) {
+    m_Height -= m_TopMargin = 17;
+    m_LeftMargin = 96;
+    m_Width = 5544;
+    m_Filters = 0x49494949;
+  } else if (!strcmp(m_CameraMake,"Samsung") && m_RawWidth == 6496) {
+    m_Filters = 0x61616161;
+    m_BlackLevel = 1 << (m_Tiff_bps - 7);
+ } else if (!strcmp(m_CameraModel,"EX1")) {
     m_ByteOrder = 0x4949;
     m_Height -= 20;
     m_TopMargin = 2;
@@ -7563,14 +7584,7 @@ konica_400z:
       m_Width  -= 56;
       m_TopMargin = 8;
     }
-  } else if (l_FileSize == 20487168) {
-    m_Height = 2808;
-    m_Width  = 3648;
-    goto wb550;
-  } else if (l_FileSize == 24000000) {
-    m_Height = 3000;
-    m_Width  = 4000;
-wb550:
+  } else if (strstr(m_CameraModel,"WB550")) {
     strcpy (m_CameraModel, "WB550");
     m_ByteOrder = 0x4d4d;
     m_LoadRawFunction = &CLASS unpacked_load_raw;
@@ -7584,86 +7598,12 @@ wb550:
     m_Filters = 0x49494949;
     m_LoadRawFunction = &CLASS unpacked_load_raw;
   } else if (!strcmp(m_CameraModel,"STV680 VGA")) {
-    m_Height = 484;
-    m_Width  = 644;
-    m_LoadRawFunction = &CLASS eight_bit_load_raw;
-    m_Flip = 2;
-    m_Filters = 0x16161616;
     m_BlackLevel = 16;
   } else if (!strcmp(m_CameraModel,"N95")) {
     m_TopMargin = 2;
     m_Height = m_RawHeight - m_TopMargin;
-  } else if (!strcmp(m_CameraModel,"531C")) {
-    m_Height = 1200;
-    m_Width  = 1600;
-    m_LoadRawFunction = &CLASS unpacked_load_raw;
-    m_Filters = 0x49494949;
   } else if (!strcmp(m_CameraModel,"640x480")) {
-    m_Height = 480;
-    m_Width  = 640;
-    m_LoadRawFunction = &CLASS eight_bit_load_raw;
     gamma_curve (0.45, 4.5, 1, 255);
-  } else if (!strcmp(m_CameraModel,"F-080C")) {
-    m_Height = 768;
-    m_Width  = 1024;
-    m_LoadRawFunction = &CLASS eight_bit_load_raw;
-  } else if (!strcmp(m_CameraModel,"F-145C")) {
-    m_Height = 1040;
-    m_Width  = 1392;
-    m_LoadRawFunction = &CLASS eight_bit_load_raw;
-  } else if (!strcmp(m_CameraModel,"F-201C")) {
-    m_Height = 1200;
-    m_Width  = 1600;
-    m_LoadRawFunction = &CLASS eight_bit_load_raw;
-  } else if (!strcmp(m_CameraModel,"F-510C")) {
-    m_Height = 1958;
-    m_Width  = 2588;
-    m_LoadRawFunction = l_FileSize < 7500000 ?
-  &CLASS eight_bit_load_raw : &CLASS unpacked_load_raw;
-    m_Data_Offset = l_FileSize - m_Width*m_Height*(l_FileSize >> 22);
-    m_WhiteLevel = 0xfff0;
-  } else if (!strcmp(m_CameraModel,"F-810C")) {
-    m_Height = 2469;
-    m_Width  = 3272;
-    m_LoadRawFunction = &CLASS unpacked_load_raw;
-    m_WhiteLevel = 0xfff0;
-  } else if (!strcmp(m_CameraModel,"XCD-SX910CR")) {
-    m_Height = 1024;
-    m_Width  = 1375;
-    m_RawWidth = 1376;
-    m_Filters = 0x49494949;
-    m_WhiteLevel = 0x3ff;
-    m_LoadRawFunction = l_FileSize < 2000000 ?
-  &CLASS eight_bit_load_raw : &CLASS unpacked_load_raw;
-  } else if (!strcmp(m_CameraModel,"2010")) {
-    m_Height = 1207;
-    m_Width  = 1608;
-    m_ByteOrder = 0x4949;
-    m_Filters = 0x16161616;
-    m_Data_Offset = 3212;
-    m_WhiteLevel = 0x3ff;
-    m_LoadRawFunction = &CLASS unpacked_load_raw;
-  } else if (!strcmp(m_CameraModel,"A782")) {
-    m_Height = 3000;
-    m_Width  = 2208;
-    m_Filters = 0x61616161;
-    m_LoadRawFunction = l_FileSize < 10000000 ?
-  &CLASS eight_bit_load_raw : &CLASS unpacked_load_raw;
-    m_WhiteLevel = 0xffc0;
-  } else if (!strcmp(m_CameraModel,"3320AF")) {
-    m_Height = 1536;
-    m_RawWidth = m_Width = 2048;
-    m_Filters = 0x61616161;
-    m_LoadRawFunction = &CLASS unpacked_load_raw;
-    m_WhiteLevel = 0x3ff;
-    fseek (m_InputFile, 0x300000, SEEK_SET);
-    if ((m_ByteOrder = guess_byte_order(0x10000)) == 0x4d4d) {
-      m_Height -= (m_TopMargin = 16);
-      m_Width -= (m_LeftMargin = 28);
-      m_WhiteLevel = 0xf5c0;
-      strcpy (m_CameraMake, "ISG");
-      m_CameraModel[0] = 0;
-    }
   } else if (!strcmp(m_CameraMake,"Hasselblad")) {
     if (m_LoadRawFunction == &CLASS lossless_jpeg_load_raw)
       m_LoadRawFunction = &CLASS hasselblad_load_raw;
@@ -7673,9 +7613,9 @@ wb550:
       m_TopMargin  = 4;
       m_LeftMargin = 7;
       m_Filters = 0x61616161;
-    } else if (m_RawWidth == 7410) {
-      m_Height = 5502;
-      m_Width  = 7328;
+    } else if (m_RawWidth == 7410 || m_RawWidth == 8282) {
+      m_Height -= 84;
+      m_Width  -= 82;
       m_TopMargin  = 4;
       m_LeftMargin = 41;
       m_Filters = 0x61616161;
@@ -7692,15 +7632,14 @@ wb550:
       m_Width -= (m_LeftMargin = 3) + 7;
       m_Filters = 0x61616161;
     }
-  } else if (!strcmp(m_CameraMake,"Sinar")) {
-    if (!memcmp(l_Head,"8BPS",4)) {
-      fseek (m_InputFile, 14, SEEK_SET);
-      m_Height = get4();
-      m_Width  = get4();
-      m_Filters = 0x61616161;
-      m_Data_Offset = 68;
+    if (m_Tiff_Samples > 1) {
+      m_IsRaw = m_Tiff_Samples+1;
+      if (!m_UserSetting_ShotSelect && !m_UserSetting_HalfSize) m_Filters = 0;
     }
+  } else if (!strcmp(m_CameraMake,"Sinar")) {
     if (!m_LoadRawFunction) m_LoadRawFunction = &CLASS unpacked_load_raw;
+    if (m_IsRaw > 1 && !m_UserSetting_ShotSelect && !m_UserSetting_ShotSelect)
+      m_Filters = 0;
     m_WhiteLevel = 0x3fff;
   } else if (!strcmp(m_CameraMake,"Leaf")) {
     m_WhiteLevel = 0x3fff;
@@ -7744,7 +7683,7 @@ wb550:
       m_Width -= 2 * (m_LeftMargin = 24);
       m_Filters = 0x16161616;
     }
-  } else if (!strcmp(m_CameraMake,"LEICA") || !strcmp(m_CameraMake,"Panasonic")) {
+  } else if (!strcmp(m_CameraMake,"Leica") || !strcmp(m_CameraMake,"Panasonic")) {
     if ((l_FLen-m_Data_Offset) / (m_RawWidth*8/7) == m_RawHeight)
       m_LoadRawFunction = &CLASS panasonic_load_raw;
     if (!m_LoadRawFunction) {
@@ -7768,11 +7707,12 @@ wb550:
     m_Filters = 0x16161616;
     m_LoadRawFunction = &CLASS packed_load_raw;
     m_Load_Flags = 30;
-  } else if (!strcmp(m_CameraMake,"OLYMPUS")) {
+  } else if (!strcmp(m_CameraMake,"Olympus")) {
     m_Height += m_Height & 1;
-    m_Filters = exif_cfa;
+    if (exif_cfa) m_Filters = exif_cfa;
     if (m_Width == 4100) m_Width -= 4;
     if (m_Width == 4080) m_Width -= 24;
+    if (m_Width == 9280) { m_Width -= 6; m_Height -= 6; }
     if (m_LoadRawFunction == &CLASS unpacked_load_raw)
       m_Load_Flags = 4;
     m_Tiff_bps = 12;
@@ -7791,10 +7731,9 @@ wb550:
       m_ThumbLength = l_FLen - (m_ThumbOffset = 0xa39800);
       m_ThumbHeight = 480;
       m_ThumbWidth  = 640;
-    } else if (!strcmp(m_CameraModel,"XZ-2")) {
-      m_LoadRawFunction = &CLASS packed_load_raw;
-      m_Load_Flags = 24;
     }
+    } else if (!strcmp(m_CameraModel,"TG-4")) {
+      m_Width -= 16;
   } else if (!strcmp(m_CameraModel,"N Digital")) {
     m_Height = 2047;
     m_Width  = 3072;
@@ -7859,72 +7798,35 @@ wb550:
     m_Height -= m_TopMargin = 4;
     m_Width -= m_LeftMargin = 32;
     gamma_curve (0, 7, 1, 255);
-  } else if (!strcmp(m_CameraModel,"C603v")) {
-    m_Height = 480;
-    m_Width  = 640;
-    if (l_FileSize < 614400 || find_green (16, 16, 3840, 5120) < 25) goto c603v;
-    strcpy (m_CameraModel,"KAI-0340");
-    m_Height -= 3;
-    m_Data_Offset = 3840;
+  } else if (!strcmp(m_CameraModel,"C603") || !strcmp(m_CameraModel,"C330")
+	|| !strcmp(m_CameraModel,"12MP")) {
     m_ByteOrder = 0x4949;
-    m_LoadRawFunction = &CLASS unpacked_load_raw;
-  } else if (!strcmp(m_CameraModel,"C603y")) {
-    m_Height = 2134;
-    m_Width  = 2848;
-c603v:
-    m_Filters = 0;
-    m_LoadRawFunction = &CLASS kodak_yrgb_load_raw;
-    gamma_curve (0, 3.875, 1, 255);
-  } else if (!strcmp(m_CameraModel,"C603")) {
-    m_RawHeight = m_Height = 2152;
-    m_RawWidth  = m_Width  = 2864;
-    goto c603;
-  } else if (!strcmp(m_CameraModel,"C330")) {
-    m_Height = 1744;
-    m_Width  = 2336;
-    m_RawHeight = 1779;
-    m_RawWidth  = 2338;
-    m_TopMargin = 33;
-    m_LeftMargin = 1;
-c603:
-    m_ByteOrder = 0x4949;
-    if ((m_Data_Offset = l_FileSize - m_RawHeight*m_RawWidth)) {
-      fseek (m_InputFile, 168, SEEK_SET);
+    if (m_Filters && m_Data_Offset) {
+      fseek (m_InputFile, m_Data_Offset < 4096 ? 168 : 5252, SEEK_SET);
       read_shorts (m_Curve, 256);
     } else gamma_curve (0, 3.875, 1, 255);
-    m_LoadRawFunction = &CLASS eight_bit_load_raw;
-  } else if (!strncasecmp(m_CameraMake,"EasyShare",9)) {
+    m_LoadRawFunction  =  m_Filters   ? &CLASS eight_bit_load_raw :
+      strcmp(m_CameraModel,"C330") ? &CLASS kodak_c603_load_raw :
+			     &CLASS kodak_c330_load_raw;
+    m_Load_Flags = m_Tiff_bps > 16;
+    m_Tiff_bps = 8;
+   } else if (!strncasecmp(m_CameraMake,"EasyShare",9)) {
     m_Data_Offset = m_Data_Offset < 0x15000 ? 0x15000 : 0x17000;
     m_LoadRawFunction = &CLASS packed_load_raw;
-  } else if (!strcasecmp(m_CameraMake,"KODAK")) {
+  } else if (!strcasecmp(m_CameraMake,"Kodak")) {
     if (m_Filters == UINT_MAX) m_Filters = 0x61616161;
-    if (!strncmp(m_CameraModel,"NC2000",6)) {
+    if (!strncmp(m_CameraModel,"NC2000",6) ||
+	!strncmp(m_CameraModel,"EOSDCS",6) ||
+	!strncmp(m_CameraModel,"DCS4",4)) {
       m_Width -= 4;
       m_LeftMargin = 2;
-    } else if (!strcmp(m_CameraModel,"EOSDCS3B")) {
-      m_Width -= 4;
-      m_LeftMargin = 2;
-    } else if (!strcmp(m_CameraModel,"EOSDCS1")) {
-      m_Width -= 4;
-      m_LeftMargin = 2;
-    } else if (!strcmp(m_CameraModel,"DCS420")) {
-      m_Width -= 4;
-      m_LeftMargin = 2;
-    } else if (!strncmp(m_CameraModel,"DCS460",7)) {
-      m_CameraModel[6]=0;
-      m_Width -= 4;
-      m_LeftMargin = 2;
-    } else if (!strcmp(m_CameraModel,"DCS460A")) {
-      m_Width -= 4;
-      m_LeftMargin = 2;
-      m_Colors = 1;
-      m_Filters = 0;
+      if (m_CameraModel[6] == ' ') m_CameraModel[6] = 0;
+      if (!strcmp(m_CameraModel,"DCS460A")) goto bw; 
     } else if (!strcmp(m_CameraModel,"DCS660M")) {
       m_BlackLevel = 214;
-      m_Colors = 1;
-      m_Filters = 0;
+      goto bw;
     } else if (!strcmp(m_CameraModel,"DCS760M")) {
-      m_Colors = 1;
+bw:   m_Colors = 1;
       m_Filters = 0;
     }
     if (!strcmp(m_CameraModel+4,"20X"))
@@ -7934,7 +7836,7 @@ c603:
       m_Data_Offset = 15424;
     }
     if (!strncmp(m_CameraModel,"DC2",3)) {
-      m_RawHeight = m_Height = 242;
+      m_RawHeight = 2 + (m_Height = 242);
       if (l_FLen < 100000) {
   m_RawWidth = 256; m_Width = 249;
   m_PixelAspect = (4.0*m_Height) / (3.0*m_Width);
@@ -7942,7 +7844,7 @@ c603:
   m_RawWidth = 512; m_Width = 501;
   m_PixelAspect = (493.0*m_Height) / (373.0*m_Width);
       }
-      m_Data_Offset += m_RawWidth + 1;
+      m_TopMargin = m_LeftMargin = 1;
       m_Colors = 4;
       m_Filters = 0x8d8d8d8d;
       simple_coeff(1);
@@ -7956,6 +7858,7 @@ c603:
       m_Width  = 768;
       m_Data_Offset = 1152;
       m_LoadRawFunction = &CLASS kodak_radc_load_raw;
+      m_Tiff_bps = 12;
     } else if (strstr(m_CameraModel,"DC50")) {
       strcpy (m_CameraModel, "DC50");
       m_Height = 512;
@@ -7975,10 +7878,6 @@ c603:
       m_ThumbOffset = 6144;
       m_ThumbMisc   = 360;
       m_WriteThumb = &CLASS layer_thumb;
-      m_Height = 1024;
-      m_Width  = 1536;
-      m_Data_Offset = 79872;
-      m_LoadRawFunction = &CLASS eight_bit_load_raw;
       m_BlackLevel = 17;
     }
   } else if (!strcmp(m_CameraModel,"Fotoman Pixtura")) {
@@ -8016,118 +7915,10 @@ c603:
     }
     m_Filters = 0x16161616;
     m_LoadRawFunction = &CLASS rollei_load_raw;
-  } else if (!strcmp(m_CameraModel,"PC-CAM 600")) {
-    m_Height = 768;
-    m_Data_Offset = m_Width = 1024;
-    m_Filters = 0x49494949;
-    m_LoadRawFunction = &CLASS eight_bit_load_raw;
-  } else if (!strcmp(m_CameraModel,"QV-2000UX")) {
-    m_Height = 1208;
-    m_Width  = 1632;
-    m_Data_Offset = m_Width * 2;
-    m_LoadRawFunction = &CLASS eight_bit_load_raw;
-  } else if (l_FileSize == 3217760) {
-    m_Height = 1546;
-    m_Width  = 2070;
-    m_RawWidth = 2080;
-    m_LoadRawFunction = &CLASS eight_bit_load_raw;
-  } else if (!strcmp(m_CameraModel,"QV-4000")) {
-    m_Height = 1700;
-    m_Width  = 2260;
-    m_LoadRawFunction = &CLASS unpacked_load_raw;
-    m_WhiteLevel = 0xffff;
-  } else if (!strcmp(m_CameraModel,"QV-5700")) {
-    m_Height = 1924;
-    m_Width  = 2576;
-    m_RawWidth = 3232;
-    m_Tiff_bps = 10;
-  } else if (!strcmp(m_CameraModel,"QV-R41")) {
-    m_Height = 1720;
-    m_Width  = 2312;
-    m_RawWidth = 3520;
-    m_LeftMargin = 2;
-  } else if (!strcmp(m_CameraModel,"QV-R51")) {
-    m_Height = 1926;
-    m_Width  = 2580;
-    m_RawWidth = 3904;
-  } else if (!strcmp(m_CameraModel,"EX-S20")) {
-    m_Height = 1208;
-    m_Width  = 1620;
-    m_RawWidth = 2432;
-    m_Flip = 3;
-  } else if (!strcmp(m_CameraModel,"EX-S100")) {
-    m_Height = 1544;
-    m_Width  = 2058;
-    m_RawWidth = 3136;
-  } else if (!strcmp(m_CameraModel,"EX-Z50")) {
-    m_Height = 1931;
-    m_Width  = 2570;
-    m_RawWidth = 3904;
-  } else if (!strcmp(m_CameraModel,"EX-Z500")) {
-    m_Height = 1937;
-    m_Width  = 2577;
-    m_RawWidth = 3904;
-    m_Filters = 0x16161616;
-  } else if (!strcmp(m_CameraModel,"EX-Z55")) {
-    m_Height = 1960;
-    m_Width  = 2570;
-    m_RawWidth = 3904;
- } else if (!strcmp(m_CameraModel,"EX-Z60")) {
-    m_Height = 2145;
-    m_Width  = 2833;
-    m_RawWidth = 3584;
-    m_Filters = 0x16161616;
-    m_Tiff_bps = 10;
-  } else if (!strcmp(m_CameraModel,"EX-Z75")) {
-    m_Height = 2321;
-    m_Width  = 3089;
-    m_RawWidth = 4672;
-    m_WhiteLevel = 0xfff;
-  } else if (!strcmp(m_CameraModel,"EX-Z750")) {
-    m_Height = 2319;
-    m_Width  = 3087;
-    m_RawWidth = 4672;
-    m_WhiteLevel = 0xfff;
-  } else if (!strcmp(m_CameraModel,"EX-Z850")) {
-    m_Height = 2468;
-    m_Width  = 3279;
-    m_RawWidth = 4928;
-    m_WhiteLevel = 0xfff;
-  } else if (!strcmp(m_CameraModel,"EX-Z8")) {
-    m_Height = 2467;
-    m_Width  = 3281;
-    m_RawHeight = 2502;
-    m_RawWidth  = 4992;
-    m_WhiteLevel = 0xfff;
-  } else if (l_FileSize == 15499264) {	/* EX-Z1050 or EX-Z1080 */
-    m_Height = 2752;
-    m_Width  = 3672;
-    m_RawWidth = 5632;
-  } else if (!strcmp(m_CameraModel,"EX-ZR100")) {
-    m_Height = 3044;
-    m_Width  = 4072;
-    m_RawWidth = 4096;
-    m_Load_Flags = 80;
-  } else if (!strcmp(m_CameraModel,"EX-P505")) {
-    m_Height = 1928;
-    m_Width  = 2568;
-    m_RawWidth = 3852;
-    m_WhiteLevel = 0xfff;
-  } else if (l_FileSize == 9313536) { /* EX-P600 or QV-R61 */
-    m_Height = 2142;
-    m_Width  = 2844;
-    m_RawWidth = 4288;
-  } else if (!strcmp(m_CameraModel,"EX-P700")) {
-    m_Height = 2318;
-    m_Width  = 3082;
-    m_RawWidth = 4672;
   }
   if (!m_CameraModel[0])
     sprintf (m_CameraModel, "%dx%d", m_Width, m_Height);
   if (m_Filters == UINT_MAX) m_Filters = 0x94949494;
-  if (m_RawColor) adobe_coeff (m_CameraMake, m_CameraModel);
-  if (m_LoadRawFunction == &CLASS kodak_radc_load_raw)
-    if (m_RawColor) adobe_coeff ("Apple","Quicktake");
   if (m_ThumbOffset && !m_ThumbHeight) {
     fseek (m_InputFile, m_ThumbOffset, SEEK_SET);
     if (ljpeg_start (&l_JHead, 1)) {
@@ -8136,9 +7927,17 @@ c603:
     }
   }
 dng_skip:
+  if ((m_UserSetting_CameraMatrix & (m_UserSetting_CameraWb || m_DNG_Version))
+	&& m_cmatrix[0][0] > 0.125) {
+    memcpy (rgb_cam, m_cmatrix, sizeof m_cmatrix);
+    m_RawColor = 0;
+  }
+  if (m_RawColor) adobe_coeff (m_CameraMake, m_CameraModel);
+  if (m_LoadRawFunction == &CLASS kodak_radc_load_raw)
+    if (m_RawColor) adobe_coeff ("Apple","Quicktake");
   if (m_Fuji_Width) {
     m_Fuji_Width = m_Width >> !fuji_layout;
-    if (~m_Fuji_Width & 1) m_Filters = 0x49494949;
+    m_Filters = m_Fuji_Width & 1 ? 0x94949494 : 0x49494949;
     m_Width = (m_Height >> fuji_layout) + m_Fuji_Width;
     m_Height = m_Width - 1;
     m_PixelAspect = 1;
@@ -8148,7 +7947,9 @@ dng_skip:
   }
   if (!m_Tiff_bps) m_Tiff_bps = 12;
   if (!m_WhiteLevel) m_WhiteLevel = (1 << m_Tiff_bps) - 1;
-  if (!m_LoadRawFunction || m_Height < 22) m_IsRaw = 0;
+  if (!m_LoadRawFunction || m_Height < 22 || m_Width < 22 ||
+	m_Tiff_bps > 16 || m_Tiff_Samples > 6 || m_Colors > 4)
+    m_IsRaw = 0;
 #ifdef NO_JASPER
   if (m_LoadRawFunction == &CLASS redcine_load_raw) {
     fprintf (stderr,_("%s: You must link dcraw with %s!\n"),
@@ -8168,13 +7969,13 @@ dng_skip:
     strcpy (m_ColorDescriptor, m_Colors == 3 ? "RGBG":"GMCY");
   if (!m_RawHeight) m_RawHeight = m_Height;
   if (!m_RawWidth ) m_RawWidth  = m_Width;
-  if (m_Filters && m_Colors == 3)
+  if (m_Filters > 999 && m_Colors == 3)
     m_Filters |= ((m_Filters >> 2 & 0x22222222) |
       (m_Filters << 2 & 0x88888888)) & m_Filters << 1;
 notraw:
   // Somehow Nikon D90 files give a corrupt value here... although they shouldn't.
-  if (m_Flip == -1) m_Flip = m_Tiff_Flip;
-  if (m_Flip == -1) m_Flip = 0;
+  if (m_Flip == UINT_MAX) m_Flip = m_Tiff_Flip;
+  if (m_Flip == UINT_MAX) m_Flip = 0;
 }
 
 void CLASS fuji_rotate() {
