@@ -6355,7 +6355,7 @@ int CLASS parse_jpeg (int offset)
     m_ByteOrder = 0x4d4d;
     len   = get2() - 2;
     save  = ftell(m_InputFile);
-    if (mark == 0xc0 || mark == 0xc3) {
+    if (mark == 0xc0 || mark == 0xc3 || mark == 0xc9) {
       fgetc(m_InputFile);
       m_RawHeight = get2();
       m_RawWidth  = get2();
@@ -6384,7 +6384,7 @@ void CLASS parse_riff()
   end = ftell(m_InputFile) + size;
   if (!memcmp(tag,"RIFF",4) || !memcmp(tag,"LIST",4)) {
     get4();
-    while (ftell(m_InputFile)+7 < (long) end)
+    while (ftell(m_InputFile)+7 < (long) end && !feof(m_InputFile))
       parse_riff();
   } else if (!memcmp(tag,"nctg",4)) {
     while ((unsigned) ftell(m_InputFile)+7 < end) {
@@ -6574,6 +6574,7 @@ void CLASS parse_foveon()
     m_RawWidth  = wide;
     m_RawHeight = high;
     m_Data_Offset = off+28;
+    m_IsFoveon = 1;
   }
   fseek (m_InputFile, off+28, SEEK_SET);
   if (fgetc(m_InputFile) == 0xff && fgetc(m_InputFile) == 0xd8
@@ -6599,7 +6600,7 @@ void CLASS parse_foveon()
   off += pent*8 + 24;
   if ((unsigned) pent > 256) pent=256;
   for (i=0; i < pent*2; i++)
-    poff[0][i] = off + get4()*2;
+    ((int *)poff)[i] = off + get4()*2;
   for (i=0; i < pent; i++) {
     foveon_gets (poff[i][0], name, 64);
     foveon_gets (poff[i][1], value, 64);
@@ -6626,7 +6627,6 @@ void CLASS parse_foveon()
     }
     fseek (m_InputFile, save, SEEK_SET);
   }
-  m_IsFoveon = 1;
 }
 
 /*
