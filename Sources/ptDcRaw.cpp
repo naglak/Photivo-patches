@@ -1807,19 +1807,15 @@ void CLASS sinar_4shot_load_raw()
   uint16_t *pixel;
   unsigned shot, row, col, r, c;
 
-  if ((shot = m_UserSetting_ShotSelect) || m_UserSetting_HalfSize) {
-    if (shot) shot--;
-    if (shot > 3) shot = 3;
+
+  if (m_Raw_Image) {
+    // lets make ptBound template happy, cast everything to unsigned
+    shot = LIM (m_UserSetting_ShotSelect, (unsigned) 1, (unsigned) 4) - 1;
     fseek (m_InputFile, m_Data_Offset + shot*4, SEEK_SET);
     fseek (m_InputFile, get4(), SEEK_SET);
     unpacked_load_raw();
     return;
   }
-  FREE (m_Raw_Image);
-  m_Raw_Image = 0;
-  m_Image = (uint16_t (*)[4])
-  CALLOC ((m_OutHeight=m_Height)*(m_OutWidth=m_Width), sizeof *m_Image);
-  merror (m_Image, "sinar_4shot_load_raw()");
   pixel = (uint16_t *) CALLOC (m_RawWidth, sizeof *pixel);
   merror (pixel, "sinar_4shot_load_raw()");
   for (shot=0; shot < 4; shot++) {
@@ -1830,18 +1826,19 @@ void CLASS sinar_4shot_load_raw()
       if ((r = row-m_TopMargin - (shot >> 1 & 1)) >= m_Height) continue;
       for (col=0; col < m_RawWidth; col++) {
   if ((c = col-m_LeftMargin - (shot & 1)) >= m_Width) continue;
-        m_Image[r*m_Width+c][FC(row,col)] = pixel[col];
+	m_Image[r*m_Width+c][(row & 1)*3 ^ (~col & 1)] = pixel[col];
       }
     }
   }
   FREE (pixel);
-  m_Shrink = m_Filters = 0;
+  m_MixGreen = 1;
 }
 
 void CLASS imacon_full_load_raw()
 {
   int row, col;
 
+  if (!m_Image) return;
   for (row=0; row < m_Height; row++)
     for (col=0; col < m_Width; col++)
       read_shorts (m_Image[row*m_Width+col], 3);
@@ -1849,13 +1846,12 @@ void CLASS imacon_full_load_raw()
 
 void CLASS packed_load_raw()
 {
-  int vbits=0, bwide, pwide, rbits, bite, half, irow, row, col, val, i;
+  int vbits=0, bwide, rbits, bite, half, irow, row, col, val, i;
   uint64_t bitbuf=0;
 
-  if (m_RawWidth * 8U >= m_Width * m_Tiff_bps)  /* Is m_RawWidth in bytes? */
-       pwide = (bwide = m_RawWidth) * 8 / m_Tiff_bps;
-  else bwide = (pwide = m_RawWidth) * m_Tiff_bps / 8;
-  rbits = bwide * 8 - pwide * m_Tiff_bps;
+  bwide = m_RawWidth * m_Tiff_bps / 8;
+  bwide += bwide & m_Load_Flags >> 7;
+  rbits = bwide * 8 - m_RawWidth * m_Tiff_bps;
   if (m_Load_Flags & 1) bwide = bwide * 16 / 15;
   bite = 8 + (m_Load_Flags & 24);
   half = (m_RawHeight+1) >> 1;
@@ -1871,16 +1867,16 @@ void CLASS packed_load_raw()
   fseek (m_InputFile, ftell(m_InputFile) >> 3 << 2, SEEK_SET);
       }
     }
-    for (col=0; col < pwide; col++) {
+    for (col=0; col < m_RawWidth; col++) {
       for (vbits -= m_Tiff_bps; vbits < 0; vbits += bite) {
   bitbuf <<= bite;
   for (i=0; i < bite; i+=8)
     bitbuf |= (unsigned) (fgetc(m_InputFile) << i);
       }
       val = bitbuf << (64-m_Tiff_bps-vbits) >> (64-m_Tiff_bps);
-      RAW(row,col ^ (m_Load_Flags >> 6)) = val;
-      if (m_Load_Flags & 1 && (col % 10) == 9 &&
-  fgetc(m_InputFile) && col < m_Width+m_LeftMargin) derror();
+      RAW(row,col ^ (m_Load_Flags >> 6 & 1)) = val;
+      if (m_Load_Flags & 1 && (col % 10) == 9 && fgetc(m_InputFile) &&
+	row < m_Height+m_TopMargin && col < m_Width+m_LeftMargin) derror();
     }
     vbits -= rbits;
   }
@@ -1890,9 +1886,10 @@ void CLASS nokia_load_raw()
 {
   uint8_t  *data,  *dp;
   int rev, dwide, row, col, c;
+  double sum[]={0,0};
 
   rev = 3 * (m_ByteOrder == 0x4949);
-  dwide = m_RawWidth * 5 / 4;
+  dwide = (m_RawWidth * 5 + 1) / 4;
   data = (uint8_t *) MALLOC (dwide*2);
   merror (data, "nokia_load_raw()");
   for (row=0; row < m_RawHeight; row++) {
@@ -1903,6 +1900,13 @@ void CLASS nokia_load_raw()
   }
   FREE (data);
   m_WhiteLevel = 0x3ff;
+  if (strcmp(m_CameraMake,"OmniVision")) return;
+  row = m_RawHeight/2;
+  for (c=0; c < m_Width-1; c++) {
+    sum[ c & 1] += SQR(RAW(row,c)-RAW(row+1,c+1));
+    sum[~c & 1] += SQR(RAW(row+1,c)-RAW(row,c+1));
+  }
+  if (sum[1] > sum[0]) m_Filters = 0x4b4b4b4b;
 }
 
 void CLASS canon_rmf_load_raw()
@@ -2148,13 +2152,13 @@ void CLASS kodak_radc_load_raw()
   (c-pt[i-2]) / (pt[i]-pt[i-2]) * (pt[i+1]-pt[i-1]) + pt[i-1] + 0.5;
   for (s=i=0; i < (int)(sizeof(src)); i+=2)
     for(c=0;c<(256>>src[i]);c++)
-      huff[0][s++] = src[i] << 8 | (unsigned char) src[i+1];
+      ((ushort *)huff)[s++] = src[i] << 8 | (unsigned char) src[i+1];
   s = m_Kodak_cbpp == 243 ? 2 : 3;
   for(c=0;c<256;c++) huff[18][c] = (8-s) << 8 | c >> s << s | 1 << (s-1);
   getbits(-1);
   memset(buf, 2048, sizeof(buf)/sizeof(short));
 //  for (unsigned i=0; i < sizeof(buf)/sizeof(short); i++)
-//    buf[0][0][i] = 2048;
+//    ((short *)buf)[i] = 2048;
   for (row=0; row < m_Height; row+=4) {
     for (c=0; c<3; c++) mul[c] = getbits(6);
     for (c=0; c<3; c++) {
@@ -2166,7 +2170,7 @@ void CLASS kodak_radc_load_raw()
         for (unsigned j=0; j < bufi2; j++)
           buf[c][i][j] = (buf[c][i][j] * val + x) >> s;
 //      for (unsigned i=0; i < sizeof(buf[0])/sizeof(short); i++)
-//        buf[c][0][i] = (buf[c][0][i] * val + x) >> s;
+//        ((short*)buf[c])[i] = (((short *)buf[c])[i] * val + x) >> s;
       last[c] = mul[c];
       for (r=0; r <= !c; r++) {
   buf[c][1][m_Width/2] = buf[c][2][m_Width/2] = mul[c] << 7;
@@ -2287,29 +2291,34 @@ void CLASS lossy_dng_load_raw()
   JSAMPLE (*pixel)[3];
   unsigned sm_ByteOrder=m_ByteOrder, ntags, opcode, deg, i, j, c;
   unsigned save=m_Data_Offset-4, trow=0, tcol=0, row, col;
-  ushort curve[3][256];
+  ushort cur[3][256];
   double coeff[9], tot;
 
-  fseek (m_InputFile, meta_offset, SEEK_SET);
-  m_ByteOrder = 0x4d4d;
-  ntags = get4();
-  while (ntags--) {
-    opcode = get4(); get4(); get4();
-    if (opcode != 8)
-    { fseek (m_InputFile, get4(), SEEK_CUR); continue; }
-    fseek (m_InputFile, 20, SEEK_CUR);
-    if ((c = get4()) > 2) break;
-    fseek (m_InputFile, 12, SEEK_CUR);
-    if ((deg = get4()) > 8) break;
-    for (i=0; i <= deg && i < 9; i++)
-      coeff[i] = getreal(12);
-    for (i=0; i < 256; i++) {
-      for (tot=j=0; j <= deg; j++)
-  tot += coeff[j] * pow(i/255.0, j);
-      curve[c][i] = tot*0xffff;
+  if (meta_offset) {
+    fseek (m_InputFile, meta_offset, SEEK_SET);
+    m_ByteOrder = 0x4d4d;
+    ntags = get4();
+    while (ntags--) {
+      opcode = get4(); get4(); get4();
+      if (opcode != 8)
+      { fseek (m_InputFile, get4(), SEEK_CUR); continue; }
+      fseek (m_InputFile, 20, SEEK_CUR);
+      if ((c = get4()) > 2) break;
+      fseek (m_InputFile, 12, SEEK_CUR);
+      if ((deg = get4()) > 8) break;
+      for (i=0; i <= deg && i < 9; i++)
+	coeff[i] = getreal(12);
+      for (i=0; i < 256; i++) {
+	for (tot=j=0; j <= deg; j++)
+	  tot += coeff[j] * pow(i/255.0, j);
+	cur[c][i] = tot*0xffff;
+      }
     }
-  }
   m_ByteOrder = sm_ByteOrder;
+  } else {
+    gamma_curve (1/2.4, 12.92, 1, 255);
+    for (c=0; c < 3; c++) memcpy (cur[c], m_Curve, sizeof cur[0]);
+  }
   cinfo.err = jpeg_std_error (&jerr);
   jpeg_create_decompress (&cinfo);
   while (trow < m_RawHeight) {
@@ -2326,7 +2335,7 @@ void CLASS lossy_dng_load_raw()
       jpeg_read_scanlines (&cinfo, buf, 1);
       pixel = (JSAMPLE (*)[3]) buf[0];
       for (col=0; col < cinfo.output_width && tcol+col < m_Width; col++) {
-  for (c=0; c<3; c++) m_Image[row*m_Width+tcol+col][c] = curve[c][pixel[col][c]];
+  for (c=0; c<3; c++) m_Image[row*m_Width+tcol+col][c] = cur[c][pixel[col][c]];
       }
     }
     jpeg_abort_decompress (&cinfo);
@@ -2553,7 +2562,7 @@ void CLASS kodak_ycbcr_load_raw()
   short buf[384], *bp;
   int row, col, len, c, i, j, k, y[2][2], cb, cr, rgb[3];
   uint16_t *ip;
-
+  if (!m_Image) return;
   for (row=0; row < m_Height; row+=2)
     for (col=0; col < m_Width; col+=128) {
       len = MIN (128, m_Width-col);
@@ -2581,8 +2590,6 @@ void CLASS kodak_rgb_load_raw()
   int row, col, len, c, i, rgb[3];
   uint16_t *ip=m_Image[0];
 
-  if (m_Raw_Image) FREE (m_Raw_Image);
-  m_Raw_Image = 0;
   for (row=0; row < m_Height; row++)
     for (col=0; col < m_Width; col+=256) {
       len = MIN (256, m_Width-col);
