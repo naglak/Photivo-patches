@@ -536,12 +536,15 @@ public:
   struct s_Tiff_IFD {
     int width, height, bps, comp, phint, offset, flip, samples, bytes;
     int tile_width, tile_length;
+    float shutter;
   } m_Tiff_IFD[10];
 
   struct s_ph1 {
-    int format, key_off, black, black_off, split_col, tag_21a;
+    int format, key_off, tag_21a;
+    int black, split_col, black_col, split_row, black_row;
     float tag_210;
   } ph1;
+
 
 
   /*************************************************************************
@@ -674,8 +677,12 @@ public:
   int   nikon_e995();
   int   nikon_is_compressed();
   void  nikon_load_raw();
+  void  nikon_yuv_load_raw();
   void  nikon_compressed_load_raw();
   void  pentax_load_raw();
+  void  samsung_load_raw();
+  void  samsung2_load_raw();
+  void  samsung3_load_raw();
   void  adobe_dng_load_raw_nc();
   void  adobe_dng_load_raw_lj();
   void  adobe_copy_pixel(unsigned row, unsigned col, uint16_t **rp);
