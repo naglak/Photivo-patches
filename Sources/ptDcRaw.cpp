@@ -466,6 +466,61 @@ void CLASS read_shorts (uint16_t *pixel, int count)
     swab ((char *)pixel, (char *)pixel, count*2);
 }
 
+void CLASS cubic_spline (const int *x_, const int *y_, const int len)
+{
+  float **A, *b, *c, *d, *x, *y;
+  int i, j;
+
+  A = (float **) calloc (((2*len + 4)*sizeof **A + sizeof *A), 2*len);
+  if (!A) return;
+  A[0] = (float *) (A + 2*len);
+  for (i = 1; i < 2*len; i++)
+    A[i] = A[0] + 2*len*i;
+  y = len + (x = i + (d = i + (c = i + (b = A[0] + i*i))));
+  for (i = 0; i < len; i++) {
+    x[i] = x_[i] / 65535.0;
+    y[i] = y_[i] / 65535.0;
+  }
+  for (i = len-1; i > 0; i--) {
+    b[i] = (y[i] - y[i-1]) / (x[i] - x[i-1]);
+    d[i-1] = x[i] - x[i-1];
+  }
+  for (i = 1; i < len-1; i++) {
+    A[i][i] = 2 * (d[i-1] + d[i]);
+    if (i > 1) {
+      A[i][i-1] = d[i-1];
+      A[i-1][i] = d[i-1];
+    }
+    A[i][len-1] = 6 * (b[i+1] - b[i]);
+  }
+  for(i = 1; i < len-2; i++) {
+    float v = A[i+1][i] / A[i][i];
+    for(j = 1; j <= len-1; j++)
+      A[i+1][j] -= v * A[i][j];
+  }
+  for(i = len-2; i > 0; i--) {
+    float acc = 0;
+    for(j = i; j <= len-2; j++)
+      acc += A[i][j]*c[j];
+    c[i] = (A[i][len-1] - acc) / A[i][i];
+  }
+  for (i = 0; i < 0x10000; i++) {
+    float x_out = (float)(i / 65535.0);
+    float y_out = 0;
+    for (j = 0; j < len-1; j++) {
+      if (x[j] <= x_out && x_out <= x[j+1]) {
+	float v = x_out - x[j];
+	y_out = y[j] +
+	  ((y[j+1] - y[j]) / d[j] - (2 * d[j] * c[j] + c[j+1] * d[j])/6) * v
+	   + (c[j] * 0.5) * v*v + ((c[j+1] - c[j]) / (6 * d[j])) * v*v*v;
+      }
+    }
+    m_Curve[i] = y_out < 0.0 ? 0 : (y_out >= 1.0 ? 65535 :
+		(ushort)(y_out * 65535.0 + 0.5));
+  }
+  free (A);
+}
+
 /* -> 1438
 void CLASS canon_black (double dark[2], int nblack)
 {
@@ -1032,7 +1087,7 @@ void CLASS canon_sraw_load_raw()
   int v[3]={0,0,0}, ver, hue;
   char *cp;
 
-  if (!ljpeg_start (&jh, 0)) return;
+  if (!ljpeg_start (&jh, 0) || jh.clrs < 4) return;
   jwide = (jh.wide >>= 1) * jh.clrs;
 
   for (ecol=slice=0; slice <= cr2_slice[0]; slice++) {
@@ -1102,23 +1157,59 @@ void CLASS adobe_copy_pixel (unsigned row, unsigned col, uint16_t **rp)
 {
   int c;
 
-  if (m_IsRaw == 2 && m_UserSetting_ShotSelect) (*rp)++;
+  if (m_Tiff_Samples == 2 && m_UserSetting_ShotSelect) (*rp)++;
   if (m_Raw_Image) {
     if (row < m_RawHeight && col < m_RawWidth)
       RAW(row,col) = m_Curve[**rp];
-    *rp += m_IsRaw;
+    *rp += m_Tiff_Samples;
   } else {
     if (row < m_Height && col < m_Width)
       for (c=0; c < (int32_t)m_Tiff_Samples; c++)
   m_Image[row*m_Width+col][c] = m_Curve[(*rp)[c]];
     *rp += m_Tiff_Samples;
   }
-  if (m_IsRaw == 2 && m_UserSetting_ShotSelect) (*rp)--;
+  if (m_Tiff_Samples == 2 && m_UserSetting_ShotSelect) (*rp)--;
+}
+
+void CLASS ljpeg_idct (struct jhead *jh)
+{
+  int c, i, j, len, skip, coef;
+  float work[3][8][8];
+  static float cs[106] = { 0 };
+  static const uchar zigzag[80] =
+  {  0, 1, 8,16, 9, 2, 3,10,17,24,32,25,18,11, 4, 5,12,19,26,33,
+    40,48,41,34,27,20,13, 6, 7,14,21,28,35,42,49,56,57,50,43,36,
+    29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,
+    47,55,62,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63,63 };
+
+  if (!cs[0])
+    for (c=0; c < 106; c++) cs[c] = cos((c & 31)*M_PI/16)/2;
+  memset (work, 0, sizeof work);
+  work[0][0][0] = jh->vpred[0] += ljpeg_diff (jh->huff[0]) * jh->quant[0];
+  for (i=1; i < 64; i++ ) {
+    len = gethuff (jh->huff[16]);
+    i += skip = len >> 4;
+    if (!(len &= 15) && skip < 15) break;
+    coef = getbits(len);
+    if ((coef & (1 << (len-1))) == 0)
+      coef -= (1 << len) - 1;
+    ((float *)work)[zigzag[i]] = coef * jh->quant[i];
+  }
+  for (c=0; c < 8; c++) work[0][0][c] *= M_SQRT1_2;
+  for (c=0; c < 8; c++) work[0][c][0] *= M_SQRT1_2;
+  for (i=0; i < 8; i++)
+    for (j=0; j < 8; j++)
+      for (c=0; c < 8; c++) work[1][i][j] += work[0][i][c] * cs[(j*2+1)*c];
+  for (i=0; i < 8; i++)
+    for (j=0; j < 8; j++)
+      for (c=0; c < 8; c++) work[2][i][j] += work[1][c][j] * cs[(i*2+1)*c];
+  //use ptBound instead of CLIP macro to be able to set the same type
+  for (c=0; c < 64; c++) jh->idct[c] = ptBound((double)0, ((float *)work[2])[c]+0.5, (double)0xffff);
 }
 
 void CLASS lossless_dng_load_raw()
 {
-  unsigned save, trow=0, tcol=0, jwide, jrow, jcol, row, col;
+  unsigned save, trow=0, tcol=0, jwide, jrow, jcol, row, col, i, j;
   struct jhead jh;
   uint16_t *rp;
 
@@ -1129,14 +1220,32 @@ void CLASS lossless_dng_load_raw()
     if (!ljpeg_start (&jh, 0)) break;
     jwide = jh.wide;
     if (m_Filters) jwide *= jh.clrs;
-    jwide /= m_IsRaw;
-    for (row=col=jrow=0; jrow < (unsigned) jh.high; jrow++) {
-      rp = ljpeg_row (jrow, &jh);
-      for (jcol=0; jcol < jwide; jcol++) {
-  adobe_copy_pixel (trow+row, tcol+col, &rp);
-  if (++col >= m_TileWidth || col >= m_RawWidth)
-    row += 1 + (col = 0);
-      }
+    jwide /= MIN (m_IsRaw, m_Tiff_Samples);
+    switch (jh.algo) {
+      case 0xc1:
+	jh.vpred[0] = 16384;
+	getbits(-1);
+	for (jrow=0; jrow+7 < jh.high; jrow += 8) {
+	  for (jcol=0; jcol+7 < jh.wide; jcol += 8) {
+	    ljpeg_idct (&jh);
+	    rp = jh.idct;
+	    row = trow + jcol/m_TileWidth + jrow*2;
+	    col = tcol + jcol%m_TileWidth;
+	    for (i=0; i < 16; i+=2)
+	      for (j=0; j < 8; j++)
+		adobe_copy_pixel (row+i, col+j, &rp);
+	  }
+	}
+	break;
+      case 0xc3:
+	for (row=col=jrow=0; jrow < jh.high; jrow++) {
+	  rp = ljpeg_row (jrow, &jh);
+	  for (jcol=0; jcol < jwide; jcol++) {
+	    adobe_copy_pixel (trow+row, tcol+col, &rp);
+	    if (++col >= m_TileWidth || col >= m_RawWidth)
+	      row += 1 + (col = 0);
+	  }
+	}
     }
     fseek (m_InputFile, save+4, SEEK_SET);
     if ((tcol += m_TileWidth) >= m_RawWidth)
@@ -1151,7 +1260,7 @@ void CLASS packed_dng_load_raw()
   // int row, col;
   unsigned row, col;
 
-  pixel = (uint16_t *) CALLOC (m_RawWidth * m_Tiff_Samples, sizeof *pixel);
+  pixel = (uint16_t *) CALLOC (m_RawWidth, m_Tiff_Samples*sizeof *pixel);
   merror (pixel, "packed_dng_load_raw()");
   for (row=0; row < m_RawHeight; row++) {
     if (m_Tiff_bps == 16)
@@ -1322,10 +1431,10 @@ void CLASS nikon_3700()
     int bits;
     char make[12], model[15];
   } table[] = {
-    { 0x00, "PENTAX",  "Optio 33WR" },
-    { 0x03, "NIKON",   "E3200" },
-    { 0x32, "NIKON",   "E3700" },
-    { 0x33, "OLYMPUS", "C740UZ" } };
+    { 0x00, "Pentax",  "Optio 33WR" },
+    { 0x03, "Nikon",   "E3200" },
+    { 0x32, "Nikon",   "E3700" },
+    { 0x33, "Olympus", "C740UZ" } };
 
   fseek (m_InputFile, 3072, SEEK_SET);
   ptfread (dp, 1, 24, m_InputFile);
@@ -1376,7 +1485,7 @@ void CLASS ppm16_thumb()
   int i;
   char *thumb;
   m_ThumbLength = m_ThumbWidth*m_ThumbHeight*3;
-  thumb = (char *) CALLOC (m_ThumbLength,2);
+  thumb = (char *) CALLOC (m_ThumbLength, 2);
   merror (thumb, "ppm16_thumb()");
   read_shorts ((uint16_t *) thumb, m_ThumbLength);
   for (i=0; i < (int32_t)m_ThumbLength; i++)
@@ -1480,14 +1589,16 @@ int CLASS raw (unsigned row, unsigned col)
 void CLASS phase_one_flat_field (int is_float, int nc)
 {
   uint16_t head[8];
-  unsigned wide, y, x, c, rend, cend, row, col;
+  unsigned wide, high, y, x, c, rend, cend, row, col;
   float *mrow, num, mult[4];
 
   read_shorts (head, 8);
-  wide = head[2] / head[4];
+  if (head[2] * head[3] * head[4] * head[5] == 0) return;
+  wide = head[2] / head[4] + (head[2] % head[4] != 0);
+  high = head[3] / head[5] + (head[3] % head[5] != 0);
   mrow = (float *) CALLOC (nc*wide, sizeof *mrow);
   merror (mrow, "phase_one_flat_field()");
-  for (y=0; y < (unsigned) (head[3] / head[5]); y++) {
+  for (y=0; y < high; y++) {
     for (x=0; x < wide; x++)
       for (c=0; c < (unsigned) nc; c+=2) {
   num = is_float ? getreal(11) : get2()/32768.0;
@@ -1496,14 +1607,18 @@ void CLASS phase_one_flat_field (int is_float, int nc)
       }
     if (y==0) continue;
     rend = head[1] + y*head[5];
-    for (row = rend-head[5]; row < m_RawHeight && row < rend; row++) {
+    for (row = rend-head[5];
+	 row < m_RawHeight && row < rend &&
+	 row < head[1]+head[3]-head[5]; row++) {
       for (x=1; x < wide; x++) {
   for (c=0; c < (unsigned) nc; c+=2) {
     mult[c] = mrow[c*wide+x-1];
     mult[c+1] = (mrow[c*wide+x] - mult[c]) / head[4];
   }
   cend = head[0] + x*head[4];
-  for (col = cend-head[4]; col < m_RawWidth && col < cend; col++) {
+	for (col = cend-head[4];
+	     col < m_RawWidth &&
+	     col < cend && col < head[0]+head[2]-head[4]; col++) {
     c = nc > 2 ? FC(row-m_TopMargin,col-m_LeftMargin) : 0;
     if (!(c & 1)) {
       c = unsigned(RAW(row,col) * mult[c]);
@@ -1531,6 +1646,7 @@ void CLASS phase_one_correct()
       {-2,-2}, {-2,2}, {2,-2}, {2,2} };
   float poly[8], num, cfrac, frac, mult[2], *yval[2];
   uint16_t *xval[2];
+  int qmult_applied = 0, qlin_applied = 0;
 
   if (m_UserSetting_HalfSize || !m_MetaLength) return;
   TRACEKEYVALS("Phase One correction","%s","");
@@ -1570,7 +1686,7 @@ void CLASS phase_one_correct()
   row  = get2();
   type = get2(); get2();
   if (col >= m_RawWidth) continue;
-  if (type == 131)      /* Bad column */
+  if (type == 131 || type == 137)      /* Bad column */
     for (row=0; row < m_RawHeight; row++)
       if (FC(row-m_TopMargin,col-m_LeftMargin) == 1) {
         for (sum=i=0; i < 4; i++)
@@ -1607,6 +1723,83 @@ void CLASS phase_one_correct()
   mindiff = diff;
   off_412 = ftell(m_InputFile) - 38;
       }
+    } else if (tag == 0x41f && !qlin_applied) { /* Quadrant linearization */
+      ushort lc[2][2][16], ref[16];
+      int qr, qc;
+      for (qr = 0; qr < 2; qr++)
+	for (qc = 0; qc < 2; qc++)
+	  for (i = 0; i < 16; i++)
+	    lc[qr][qc][i] = get4();
+      for (i = 0; i < 16; i++) {
+	int v = 0;
+	for (qr = 0; qr < 2; qr++)
+	  for (qc = 0; qc < 2; qc++)
+	    v += lc[qr][qc][i];
+	ref[i] = (v + 2) >> 2;
+      }
+      for (qr = 0; qr < 2; qr++) {
+	for (qc = 0; qc < 2; qc++) {
+	  int cx[19], cf[19];
+	  for (i = 0; i < 16; i++) {
+	    cx[1+i] = lc[qr][qc][i];
+	    cf[1+i] = ref[i];
+	  }
+	  cx[0] = cf[0] = 0;
+	  cx[17] = cf[17] = ((unsigned) ref[15] * 65535) / lc[qr][qc][15];
+	  cx[18] = cf[18] = 65535;
+	  cubic_spline(cx, cf, 19);
+	  for (row = (qr ? ph1.split_row : 0);
+	       row < (qr ? m_RawHeight : ph1.split_row); row++)
+	    for (col = (qc ? ph1.split_col : 0);
+		 col < (qc ? m_RawWidth : ph1.split_col); col++)
+	      RAW(row,col) = m_Curve[RAW(row,col)];
+	}
+      }
+      qlin_applied = 1;
+    } else if (tag == 0x41e && !qmult_applied) { /* Quadrant multipliers */
+      float qmult[2][2] = { { 1, 1 }, { 1, 1 } };
+      get4(); get4(); get4(); get4();
+      qmult[0][0] = 1.0 + getreal(11);
+      get4(); get4(); get4(); get4(); get4();
+      qmult[0][1] = 1.0 + getreal(11);
+      get4(); get4(); get4();
+      qmult[1][0] = 1.0 + getreal(11);
+      get4(); get4(); get4();
+      qmult[1][1] = 1.0 + getreal(11);
+      for (row=0; row < m_RawHeight; row++)
+	for (col=0; col < m_RawWidth; col++) {
+	  i = qmult[row >= ph1.split_row][col >= ph1.split_col] * RAW(row,col);
+	  RAW(row,col) = LIM(i,0,65535);
+	}
+      qmult_applied = 1;
+    } else if (tag == 0x431 && !qmult_applied) { /* Quadrant combined */
+      ushort lc[2][2][7], ref[7];
+      int qr, qc;
+      for (i = 0; i < 7; i++)
+	ref[i] = get4();
+      for (qr = 0; qr < 2; qr++)
+	for (qc = 0; qc < 2; qc++)
+	  for (i = 0; i < 7; i++)
+	    lc[qr][qc][i] = get4();
+      for (qr = 0; qr < 2; qr++) {
+	for (qc = 0; qc < 2; qc++) {
+	  int cx[9], cf[9];
+	  for (i = 0; i < 7; i++) {
+	    cx[1+i] = ref[i];
+	    cf[1+i] = ((unsigned) ref[i] * lc[qr][qc][i]) / 10000;
+	  }
+	  cx[0] = cf[0] = 0;
+	  cx[8] = cf[8] = 65535;
+	  cubic_spline(cx, cf, 9);
+	  for (row = (qr ? ph1.split_row : 0);
+	       row < (qr ? m_RawHeight : ph1.split_row); row++)
+	    for (col = (qc ? ph1.split_col : 0);
+		 col < (qc ? m_RawWidth : ph1.split_col); col++)
+	      RAW(row,col) = m_Curve[RAW(row,col)];
+        }
+      }
+      qmult_applied = 1;
+      qlin_applied = 1;
     }
     fseek (m_InputFile, save, SEEK_SET);
   }
@@ -1691,18 +1884,22 @@ void CLASS phase_one_load_raw_c()
   static const int length[] = { 8,7,6,9,11,10,5,12,14,13 };
   int *offset, len[2], pred[2], row, col, i, j;
   uint16_t *pixel;
-  short (*black)[2];
+  short (*cblack)[2], (*rblack)[2];
 
-  pixel = (uint16_t *) CALLOC (m_RawWidth + m_RawHeight*4, 2);
+  pixel = (uint16_t *) CALLOC (m_RawWidth*3 + m_RawHeight*4, 2);
   merror (pixel, "phase_one_load_raw_c()");
   offset = (int *) (pixel + m_RawWidth);
   fseek (m_InputFile, strip_offset, SEEK_SET);
   for (row=0; row < m_RawHeight; row++)
     offset[row] = get4();
-  black = (short (*)[2]) offset + m_RawHeight;
+  cblack = (short (*)[2]) (offset + m_RawHeight);
   fseek (m_InputFile, ph1.black_col, SEEK_SET);
   if (ph1.black_col)
-    read_shorts ((uint16_t *) black[0], m_RawHeight*2);
+    read_shorts ((ushort *) cblack[0], m_RawHeight*2);
+  rblack = cblack + m_RawHeight;
+  fseek (m_InputFile, ph1.black_row, SEEK_SET);
+  if (ph1.black_row)
+    read_shorts ((ushort *) rblack[0], m_RawWidth*2);
   for (i=0; i < 256; i++)
     m_Curve[i] = (uint16_t) (i*i / 3.969 + 0.5);
   for (row=0; row < m_RawHeight; row++) {
@@ -1726,8 +1923,10 @@ void CLASS phase_one_load_raw_c()
   pixel[col] = m_Curve[pixel[col]];
     }
     for (col=0; col < m_RawWidth; col++) {
-      i = (pixel[col] << 2) - ph1.black + black[row][col >= ph1.split_col];
-  if (i > 0) RAW(row,col) = i;
+      i = (pixel[col] << 2*(ph1.format != 8)) - ph1.black
+	+ cblack[row][col >= ph1.split_col]
+	+ rblack[col][row >= ph1.split_row];
+      if (i > 0) RAW(row,col) = i;
     }
   }
   FREE (pixel);
@@ -1737,26 +1936,57 @@ void CLASS phase_one_load_raw_c()
 void CLASS hasselblad_load_raw()
 {
   struct jhead jh;
-  int row, col, pred[2], len[2], diff, c;
+  int shot, row, col, *back[5], len[2], diff[12], pred, sh, f, s, c;
+  unsigned upix, urow, ucol;
+  ushort *ip;
 
   if (!ljpeg_start (&jh, 0)) return;
   m_ByteOrder = 0x4949;
   ph1_bits(-1);
+  back[4] = (int *) calloc (m_RawWidth, 3*sizeof **back);
+  merror (back[4], "hasselblad_load_raw()");
+  for (c=0; c < 3; c++) back[c] = back[4] + c*m_RawWidth;
+  m_CBlackLevel[6] >>= sh = m_Tiff_Samples > 1;
+  shot = LIM(m_UserSetting_ShotSelect, (unsigned) 1, m_Tiff_Samples) - 1;
   for (row=0; row < m_RawHeight; row++) {
-    pred[0] = pred[1] = 0x8000 + m_Load_Flags;
+    for (c=0; c < 4; c++) back[(c+3) & 3] = back[c];
     for (col=0; col < m_RawWidth; col+=2) {
-      for(c=0;c<2;c++) len[c] = ph1_huff(jh.huff[0]);
-      for(c=0;c<2;c++) {
-  diff = ph1_bits(len[c]);
-  if ((diff & (1 << (len[c]-1))) == 0)
-    diff -= (1 << len[c]) - 1;
-  if (diff == 65535) diff = -32768;
-	RAW(row,col+c) = pred[c] += diff;
+      for (s=0; s < m_Tiff_Samples*2; s+=2) {
+	for (c=0; c < 2; c++) len[c] = ph1_huff(jh.huff[0]);
+	for (c=0; c < 2; c++) {
+	  diff[s+c] = ph1_bits(len[c]);
+	  if ((diff[s+c] & (1 << (len[c]-1))) == 0)
+	    diff[s+c] -= (1 << len[c]) - 1;
+	  if (diff[s+c] == 65535) diff[s+c] = -32768;
+	}
+      }
+      for (s=col; s < col+2; s++) {
+	pred = 0x8000 + m_Load_Flags;
+	if (col) pred = back[2][s-2];
+	if (col && row > 1) switch (jh.psv) {
+	  case 11: pred += back[0][s]/2 - back[0][s-2]/2;  break;
+	}
+	f = (row & 1)*3 ^ ((col+s) & 1);
+	for (c=0; c < m_Tiff_Samples; c++) {
+	  pred += diff[(s & 1)*m_Tiff_Samples+c];
+	  upix = pred >> sh & 0xffff;
+	  if (m_Raw_Image && c == shot)
+	    RAW(row,s) = upix;
+	  if (m_Image) {
+	    urow = row-m_TopMargin  + (c & 1);
+	    ucol = col-m_LeftMargin - ((c >> 1) & 1);
+	    ip = &m_Image[urow*m_Width+ucol][f];
+	    if (urow < m_Height && ucol < m_Width)
+	      *ip = c < 4 ? upix : (*ip + upix) >> 1;
+	  }
+	}
+	back[2][s] = pred;
       }
     }
   }
+  free (back[4]);
   ljpeg_end (&jh);
-  m_WhiteLevel = 0xffff;
+  if (m_Image) m_MixGreen = 1;
 }
 
 void CLASS leaf_hdr_load_raw()

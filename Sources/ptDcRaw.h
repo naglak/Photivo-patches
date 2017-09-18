@@ -709,6 +709,7 @@ public:
   int   canon_600_color(int ratio[2],int mar);
   void  canon_600_fixed_wb(int temp);
   void  canon_load_raw();
+  void  ljpeg_idct (struct jhead *jh);
   void  lossless_dng_load_raw();
   void  lossy_dng_load_raw();
   void  packed_dng_load_raw();
@@ -718,6 +719,7 @@ public:
   void  crop_masked_pixels();
   /* void  canon_black (double dark[2],int nblack); */
   void  read_shorts(uint16_t *pixel,int count);
+  void  cubic_spline (const int *x_, const int *y_, const int len);
   double  getreal(int type);
   float  int_to_float(int i);
   unsigned  getint(int type);
