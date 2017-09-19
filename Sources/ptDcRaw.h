@@ -477,7 +477,7 @@ public:
   uint16_t  m_IsFuji;
   int       m_Flip;
   int       m_Tiff_Flip;
-  int       m_Mask[8][4];
+  uint16_t  m_Mask[8][4];
   uint16_t  m_Curve[0x10000];
   uint16_t* m_Raw_Image;
   float     m_cmatrix[3][4];

@@ -324,16 +324,9 @@ int CLASS fcol (int row, int col)
     { 0,2,0,3,1,0,0,1,1,3,3,2,3,2,2,1 },
     { 2,1,3,2,3,1,2,1,0,3,0,2,0,2,0,2 },
     { 0,3,1,0,0,2,0,3,2,1,3,1,1,3,1,3 } };
-  static const char filter2[6][6] =
-  { { 1,1,0,1,1,2 },
-    { 1,1,2,1,1,0 },
-    { 2,0,1,0,2,1 },
-    { 1,1,2,1,1,0 },
-    { 1,1,0,1,1,2 },
-    { 0,2,1,2,0,1 } };
 
   if (m_Filters == 1) return filter[(row+m_TopMargin)&15][(col+m_LeftMargin)&15];
-  if (m_Filters == 2) return filter2[(row+6) % 6][(col+6) % 6];
+  if (m_Filters == 9) return xtrans[(row+6) % 6][(col+6) % 6];
   return FC(row,col);
 }
 
@@ -348,6 +341,15 @@ char* CLASS my_memmem (char *haystack, size_t haystacklen,
   return 0;
 }
 #define memmem my_memmem
+char *my_strcasestr (char *haystack, const char *needle)
+{
+  char *c;
+  for (c = haystack; *c; c++)
+    if (!strncasecmp(c, needle, strlen(needle)))
+      return c;
+  return 0;
+}
+#define strcasestr my_strcasestr
 #endif
 
 float rgb_cam[3][4];
@@ -707,16 +709,13 @@ int CLASS canon_s2is()
   return 0;
 }
 
-/*
-   getbits(-1) initializes the buffer
-   getbits(n) where 0 <= n <= 25 returns an n-bit integer
- */
 unsigned CLASS getbithuff(int nbits,uint16_t *huff)
 {
   // unsigned c;
   int c;
 
-  if (nbits == -1)
+  if (nbits > 25) return 0;
+  if (nbits < 0)
     return m_getbithuff_bitbuf = m_getbithuff_vbits = m_getbithuff_reset = 0;
   if (nbits == 0 || m_getbithuff_vbits < 0) return 0;
   while (!m_getbithuff_reset && m_getbithuff_vbits < nbits && (c = fgetc(m_InputFile)) != EOF &&
@@ -929,21 +928,20 @@ void CLASS canon_load_raw()
 
 struct jhead {
   int algo, bits, high, wide, clrs, sraw, psv, restart, vpred[6];
-  uint16_t quant[64], idct[64], *huff[20], *free[20], *row;
+  ushort quant[64], idct[64], *huff[20], *free[20], *row;
 };
 
 int CLASS ljpeg_start (struct jhead *jh, int info_only)
 {
-  int c, tag, len;
+  ushort c, tag, len;
   uint8_t data[0x10000];
   const uint8_t *dp;
 
   memset (jh, 0, sizeof *jh);
   jh->restart = INT_MAX;
-  ptfread (data, 2, 1, m_InputFile);
-  if (data[1] != 0xd8) return 0;
+  if ((fgetc(m_InputFile),fgetc(m_InputFile)) != 0xd8) return 0;
   do {
-    ptfread (data, 2, 2, m_InputFile);
+    if (!fread (data, 2, 2, m_InputFile)) return 0; //can't use ptfread here
     tag =  data[0] << 8 | data[1];
     len = (data[2] << 8 | data[3]) - 2;
     if (tag <= 0xff00) return 0;
@@ -951,7 +949,9 @@ int CLASS ljpeg_start (struct jhead *jh, int info_only)
     switch (tag) {
       case 0xffc3:
         jh->sraw = ((data[7] >> 4) * (data[7] & 15) - 1) & 3;
+      case 0xffc1:
       case 0xffc0:
+  jh->algo = tag & 0xff;
   jh->bits = data[0];
   jh->high = data[1] << 8 | data[2];
   jh->wide = data[3] << 8 | data[4];
@@ -960,18 +960,25 @@ int CLASS ljpeg_start (struct jhead *jh, int info_only)
   break;
       case 0xffc4:
   if (info_only) break;
-  for (dp = data; dp < data+len && (c = *dp++) < 4; )
+  for (dp = data; dp < data+len && !((c = *dp++) & -20); )
     jh->free[c] = jh->huff[c] = make_decoder_ref (&dp);
   break;
       case 0xffda:
   jh->psv = data[1+data[0]*2];
         jh->bits -= data[3+data[0]*2] & 15;
   break;
+      case 0xffdb:
+  for(c=0; c < 64; c++) jh->quant[c] = data[c*2+1] << 8 | data[c*2+2];
+  break;
       case 0xffdd:
   jh->restart = data[0] << 8 | data[1];
     }
   } while (tag != 0xffda);
+  if (jh->bits > 16 || jh->clrs > 6 ||
+     !jh->bits || !jh->high || !jh->wide || !jh->clrs) return 0;
   if (info_only) return 1;
+  if (!jh->huff[0]) return 0;
+  for(c=0; c < 19; c++) if (!jh->huff[c+1]) jh->huff[c+1] = jh->huff[c];
   for (c=0;c<5;c++) if (!jh->huff[c+1]) jh->huff[c+1] = jh->huff[c];
   if (jh->sraw) {
     for (c=0;c<4;c++) jh->huff[2+c] = jh->huff[1];
@@ -1061,16 +1068,16 @@ void CLASS lossless_jpeg_load_raw()
       val = m_Curve[*rp++];
       if (cr2_slice[0]) {
   jidx = jrow*jwide + jcol;
-  i = jidx / (cr2_slice[1]*jh.high);
+  i = jidx / (cr2_slice[1]*m_RawHeight);
   if ((j = i >= cr2_slice[0]))
      i  = cr2_slice[0];
-  jidx -= i * (cr2_slice[1]*jh.high);
+  jidx -= i * (cr2_slice[1]*m_RawHeight);
   row = jidx / cr2_slice[1+j];
   col = jidx % cr2_slice[1+j] + i*cr2_slice[1];
       }
       if (m_RawWidth == 3984 && (col -= 2) < 0)
         col += (row--,m_RawWidth);
-      if (row >= 0) RAW(row,col) = val;
+      if ((unsigned) row < m_RawHeight) RAW(row,col) = val;
       if (++col >= m_RawWidth)
   col = (row++,0);
     }
@@ -3052,6 +3059,8 @@ void CLASS smal_decode_segment (unsigned seg[2][2], int holes)
 
   fseek (m_InputFile, seg[0][1]+1, SEEK_SET);
   getbits(-1);
+  if (seg[1][0] > m_RawWidth*m_RawHeight)
+      seg[1][0] = m_RawWidth*m_RawHeight;
   for (pix=seg[0][0]; pix < (int32_t)seg[1][0]; pix++) {
     for (s=0; s < 3; s++) {
       data = data << nbits | getbits(nbits);
@@ -3160,10 +3169,10 @@ void CLASS smal_v9_load_raw()
 
   fseek (m_InputFile, 67, SEEK_SET);
   offset = get4();
-  nseg = fgetc(m_InputFile);
+  nseg = (uchar) fgetc(m_InputFile);
   fseek (m_InputFile, offset, SEEK_SET);
   for (i=0; i < nseg*2; i++)
-    seg[0][i] = get4() + m_Data_Offset*(i & 1);
+    ((unsigned *)seg)[i] = get4() + m_Data_Offset*(i & 1);
   fseek (m_InputFile, 78, SEEK_SET);
   holes = fgetc(m_InputFile);
   fseek (m_InputFile, 88, SEEK_SET);
@@ -3191,7 +3200,7 @@ void CLASS redcine_load_raw()
   if (!jimg) longjmp (failure, 3);
   jmat = jas_matrix_create (m_Height/2, m_Width/2);
   merror (jmat, "redcine_m_load_raw()");
-  img = (uint16_t *) calloc ((m_Height+2)*(m_Width+2), 2);
+  img = (uint16_t *) calloc ((m_Height+2), (m_Width+2)*2);
   merror (img, "redcine_m_load_raw()");
   for (c=0; c<4; c++) {
     jas_m_Image_readcmpt (jimg, c, 0, 0, m_Width/2, m_Height/2, jmat);
@@ -3360,7 +3369,7 @@ void CLASS foveon_huff (uint16_t *huff)
 void CLASS foveon_dp_load_raw()
 {
   unsigned c, roff[4], row, col, diff;
-  uint16_t huff[258], vpred[2][2], hpred[2];
+  uint16_t huff[512], vpred[2][2], hpred[2];
 
   fseek (m_InputFile, 8, SEEK_CUR);
   foveon_huff (huff);
@@ -3413,7 +3422,7 @@ void CLASS foveon_load_camf()
     m_MetaData[j++] = hpred[0] >> 4;
     m_MetaData[j++] = hpred[0] << 4 | hpred[1] >> 8;
     m_MetaData[j++] = hpred[1];
-        }
+  }
       }
     }
   } else
@@ -3649,8 +3658,8 @@ void CLASS foveon_interpolate()
   black = (float (*)[3]) CALLOC (m_Height, sizeof *black);
   for (row=0; row < m_Height; row++) {
     for (i=0; i < 6; i++)
-      ddft[0][0][i] = ddft[1][0][i] +
-  row / (m_Height-1.0) * (ddft[2][0][i] - ddft[1][0][i]);
+      ((float *)ddft[0])[i] = ((float *)ddft[1])[i] +
+  row / (m_Height-1.0) * (((float *)ddft[2])[i] - ((float *)ddft[1])[i]);
     for (c=0; c<3; c++) black[row][c] =
   ( foveon_avg (m_Image[row*m_Width]+c, dscr[0], cfilt) +
     foveon_avg (m_Image[row*m_Width]+c, dscr[1], cfilt) * 3
@@ -3695,8 +3704,8 @@ void CLASS foveon_interpolate()
 
   for (row=0; row < m_Height; row++) {
     for (i=0; i < 6; i++)
-      ddft[0][0][i] = ddft[1][0][i] +
-  row / (m_Height-1.0) * (ddft[2][0][i] - ddft[1][0][i]);
+      ((float *)ddft[0])[i] = ((float *)ddft[1])[i] +
+    row / (m_Height-1.0) * (((float *)ddft[2])[i] - ((float *)ddft[1])[i]);
     pix = m_Image[row*m_Width];
     memcpy (prev, pix, sizeof prev);
     frow = row / (m_Height-1.0) * (dim[2]-1);
@@ -3735,7 +3744,7 @@ void CLASS foveon_interpolate()
   FREE (sgrow);
   FREE (sgain);
 
-  if ((badpix = (unsigned int *) foveon_camf_matrix (dim, "BadPixels"))) {
+  if ((badpix = (unsigned *) foveon_camf_matrix (dim, "BadPixels"))) {
     for (i=0; (unsigned) i < dim[0]; i++) {
       col = (badpix[i] >> 8 & 0xfff) - keep[0];
       row = (badpix[i] >> 20       ) - keep[1];
@@ -3877,7 +3886,7 @@ void CLASS foveon_interpolate()
   }
 
   /* Smooth the image bottom-to-top and save at 1/4 scale */
-  shrink = (short (*)[3]) CALLOC ((m_Width/4) * (m_Height/4), sizeof *shrink);
+  shrink = (short (*)[3]) CALLOC ((m_Height/4), (m_Width/4)*sizeof *shrink);
   merror (shrink, "foveon_interpolate()");
   for (row = m_Height/4; row--; )
     for (col=0; col < m_Width/4; col++) {
@@ -3981,11 +3990,11 @@ void CLASS crop_masked_pixels()
       for (col=0; col < m_Width; col++)
   BAYER2(row,col) = RAW(row+m_TopMargin,col+m_LeftMargin);
   }
-  if (m_Mask[0][3]) goto mask_set;
+  if (m_Mask[0][3] > 0) goto mask_set;
   if (m_LoadRawFunction == &CLASS canon_load_raw ||
       m_LoadRawFunction == &CLASS lossless_jpeg_load_raw) {
-    m_Mask[0][1] = m_Mask[1][1] = 2;
-    m_Mask[0][3] = -2;
+    m_Mask[0][1] = m_Mask[1][1] += 2;
+    m_Mask[0][3] -= 2;
     goto sides;
   }
   if (m_LoadRawFunction == &CLASS canon_600_load_raw ||
@@ -4007,8 +4016,8 @@ sides:
 mask_set:
   memset (mm_BlackLevel, 0, sizeof mm_BlackLevel);
   for (zero=m=0; m < 8; m++)
-    for (row=m_Mask[m][0]; row < m_Mask[m][2]; row++)
-      for (col=m_Mask[m][1]; col < m_Mask[m][3]; col++) {
+    for (row=MAX(m_Mask[m][0], (uint16_t) 0); row < MIN(m_Mask[m][2],m_RawHeight); row++)
+      for (col=MAX(m_Mask[m][1],(uint16_t) 0); col < MIN(m_Mask[m][3],m_RawWidth); col++) {
   c = FC(row-m_TopMargin,col-m_LeftMargin);
   mm_BlackLevel[c] += val = RAW(row,col);
   mm_BlackLevel[4+c]++;
@@ -4018,8 +4027,10 @@ mask_set:
     m_BlackLevel = (mm_BlackLevel[0]+mm_BlackLevel[1]+mm_BlackLevel[2]+mm_BlackLevel[3]) /
       (mm_BlackLevel[4]+mm_BlackLevel[5]+mm_BlackLevel[6]+mm_BlackLevel[7]) - 4;
     canon_600_correct();
-  } else if (zero < mm_BlackLevel[4] && mm_BlackLevel[5] && mm_BlackLevel[6] && mm_BlackLevel[7])
+  } else if (zero < mm_BlackLevel[4] && mm_BlackLevel[5] && mm_BlackLevel[6] && mm_BlackLevel[7]) {
     for (c=0; c<4; c++) m_CBlackLevel[c] = mm_BlackLevel[c] / mm_BlackLevel[4+c];
+    m_CBlackLevel[4] = m_CBlackLevel[5] = m_CBlackLevel[6] = 0;   
+  }
 }
 
 void CLASS remove_zeroes()
@@ -4233,7 +4244,7 @@ void CLASS cam_xyz_coeff (float MatrixCamRGBToSRGB[3][4], double MatrixXYZToCamR
 
   pseudoinverse (MatrixSRGBToCamRGB, inverse, m_Colors);
   m_RawColorPhotivo = m_RawColor;
-  for (m_RawColor = i=0; i < 3; i++)
+  for (i=0; i < 3; i++)
     for (j=0; j < m_Colors; j++)
       MatrixCamRGBToSRGB[i][j] = inverse[j][i];
 }
